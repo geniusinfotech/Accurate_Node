@@ -122,6 +122,8 @@ export class AuditLogInterceptor implements NestInterceptor {
             entityType,
             entityId,
             after,
+            before,
+            changes,
           );
 
           const logPayload: any = {
@@ -167,11 +169,22 @@ export class AuditLogInterceptor implements NestInterceptor {
       'id',
       'createdAt',
       'updatedAt',
+      'password',
+      'refreshToken',
+      'accessToken',
+      'resetPasswordToken',
+      'token',
+      'secret',
     ]);
     const changes: Array<{ field: string; from: any; to: any }> = [];
 
-    for (const field of Object.keys(before)) {
-      if (excludedFields.has(field) || !(field in after)) continue;
+    // Compare request payload (before) against saved record (after) so the
+    // summary reads "Price 100 → 120" instead of dumping two JSON blobs.
+    const fields = new Set([...Object.keys(before), ...Object.keys(after)]);
+    for (const field of fields) {
+      if (excludedFields.has(field)) continue;
+      // Skip server-managed bookkeeping that reads as noise.
+      if (/^(createdAt|updatedAt|__v)$/.test(field)) continue;
 
       const fromValue = before[field];
       const toValue = after[field];
@@ -183,7 +196,9 @@ export class AuditLogInterceptor implements NestInterceptor {
       const toSnapshot = isComplex(toValue) ? JSON.stringify(toValue) : toValue;
 
       if (fromSnapshot !== toSnapshot) {
+        // New fields (create) show as "empty → value"; removed as "value → empty".
         changes.push({ field, from: fromSnapshot, to: toSnapshot });
+        if (changes.length >= 20) break; // keep the log readable
       }
     }
 
@@ -195,7 +210,22 @@ export class AuditLogInterceptor implements NestInterceptor {
     entityType: string,
     entityId: string,
     after: any,
+    before?: any,
+    changes?: Array<{ field: string; from: any; to: any }>,
   ): string {
+    const entityLabel = this.humanizeEntity(entityType);
+    const name = this.pickDisplayName(after || before);
+    const quotedName = name ? ` "${this.shorten(name, 60)}"` : '';
+    const verb =
+      action === 'create'
+        ? 'Created'
+        : action === 'delete'
+          ? 'Deleted'
+          : action === 'mark_done'
+            ? 'Completed'
+            : 'Updated';
+
+    // Sale keeps its rich legacy format.
     if (
       action === 'create' &&
       entityType === 'Sale' &&
@@ -203,10 +233,130 @@ export class AuditLogInterceptor implements NestInterceptor {
       typeof after === 'object'
     ) {
       const saleNumber = after.saleNumber || '';
-      const customerName = after.customerName || '';
-      const totalAmount = after.totalAmount ?? '';
-      return `Created Sale ${saleNumber} for ${customerName} ₹${totalAmount}`.trim();
+      const customerName = after.customerName || 'a customer';
+      const total =
+        after.totalAmount ?? after.total ?? after.grandTotal ?? '';
+      const money = total !== '' ? ` for ${this.formatMoney(total)}` : '';
+      return `Created Sale${saleNumber ? ` ${saleNumber}` : ''} for ${customerName}${money}`.trim();
     }
-    return `${action} ${entityType} ${entityId}`;
+
+    // Order create/update with order number + status context.
+    if (entityType === 'Order' && after && typeof after === 'object') {
+      const orderNo = after.orderNumber ? ` #${after.orderNumber}` : quotedName;
+      if (action === 'create') {
+        const total = after.total ?? after.grandTotal ?? '';
+        return `Created Order${orderNo}${total !== '' ? ` worth ${this.formatMoney(total)}` : ''}`.trim();
+      }
+      if (action === 'update' && changes?.length) {
+        return `Updated Order${orderNo}: ${this.summarizeChanges(changes)}`;
+      }
+      return `${verb} Order${orderNo}`.trim();
+    }
+
+    // Generic update: list up to 3 changed fields in plain language.
+    if (action === 'update' && changes?.length) {
+      return `${verb} ${entityLabel}${quotedName}: ${this.summarizeChanges(changes)}`;
+    }
+
+    // Generic create/delete/mark_done with a money hint where relevant.
+    if ((action === 'create' || action === 'delete') && after && typeof after === 'object') {
+      const moneyHint = this.pickMoneyHint(after);
+      return `${verb} ${entityLabel}${quotedName}${moneyHint}`.trim();
+    }
+    if (action === 'mark_done') {
+      return `${verb} ${entityLabel}${quotedName}`.trim();
+    }
+
+    // Fallback — never expose a raw ObjectId as the headline when we have a name.
+    if (name) return `${verb} ${entityLabel}${quotedName}`;
+    return `${verb} ${entityLabel} ${entityId}`;
+  }
+
+  private humanizeEntity(entityType: string): string {
+    const map: Record<string, string> = {
+      RawMaterial: 'Raw Material',
+      WorkBatch: 'Work Batch',
+      WorkerPayment: 'Worker Payment',
+      SemiFinishedStock: 'Semi-Finished Stock',
+      Sale: 'Sale',
+      Order: 'Order',
+      Product: 'Product',
+      Dealer: 'Dealer',
+    };
+    if (map[entityType]) return map[entityType];
+    return entityType
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private pickDisplayName(obj: any): string {
+    if (!obj || typeof obj !== 'object') return '';
+    const candidates = [
+      obj.name,
+      obj.title,
+      obj.customerName,
+      obj.dealerName,
+      obj.workerName,
+      obj.orderNumber && `Order #${obj.orderNumber}`,
+      obj.saleNumber && `Sale ${obj.saleNumber}`,
+      obj.code,
+      obj.sku,
+      obj.email,
+      obj.phone,
+      obj.lotId,
+    ];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+    return '';
+  }
+
+  private pickMoneyHint(after: any): string {
+    const amount =
+      after.totalAmount ?? after.total ?? after.grandTotal ?? after.price ?? after.amount;
+    if (amount === undefined || amount === null || amount === '') return '';
+    if (typeof amount === 'number') return ` (${this.formatMoney(amount)})`;
+    return '';
+  }
+
+  private summarizeChanges(
+    changes: Array<{ field: string; from: any; to: any }>,
+  ): string {
+    const shown = changes.slice(0, 3).map((c) => {
+      const label = this.humanizeField(c.field);
+      return `${label} ${this.formatShort(c.from)} → ${this.formatShort(c.to)}`;
+    });
+    const extra = changes.length > 3 ? ` (+${changes.length - 3} more)` : '';
+    return shown.join(', ') + extra;
+  }
+
+  private humanizeField(field: string): string {
+    return field
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^./, (ch) => ch.toUpperCase());
+  }
+
+  private formatShort(value: any): string {
+    if (value === null || value === undefined || value === '') return 'empty';
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (typeof value === 'number') return String(value);
+    const str = String(value);
+    return str.length > 40 ? `${str.slice(0, 40)}…` : str;
+  }
+
+  private formatMoney(value: any): string {
+    if (typeof value === 'number') {
+      return `₹${value.toLocaleString('en-IN')}`;
+    }
+    return `₹${value}`;
+  }
+
+  private shorten(value: string, max: number): string {
+    return value.length > max ? `${value.slice(0, max)}…` : value;
   }
 }

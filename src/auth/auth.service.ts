@@ -3,6 +3,7 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { UsersService } from '../users/users.service';
 import * as bcrypt from 'bcrypt';
@@ -171,13 +172,27 @@ export class AuthService {
     const exists = await this.usersService.findByEmail(normalizedEmail);
     if (exists) throw new UnauthorizedException('Email already exists');
 
+    // Support legacy `name` payload from the storefront signup form.
+    let firstname = createUserDto.firstname?.trim();
+    let lastname = createUserDto.lastname?.trim();
+    const fullName = (createUserDto as any)?.name?.trim();
+    if ((!firstname || !lastname) && fullName) {
+      const [first, ...rest] = fullName.split(/\s+/);
+      firstname = firstname || first;
+      lastname = lastname || (rest.join(' ') || first);
+    }
+    if (!firstname || firstname.length < 2)
+      throw new BadRequestException('firstname must be at least 2 characters');
+    if (!lastname || lastname.length < 2)
+      throw new BadRequestException('lastname must be at least 2 characters');
+
     const salt = await bcrypt.genSalt(12);
     const hash = await bcrypt.hash(createUserDto.password, salt);
 
     const userData = {
       email: normalizedEmail,
-      firstname: createUserDto.firstname.trim(),
-      lastname: createUserDto.lastname.trim(),
+      firstname,
+      lastname,
       username: normalizedEmail.split('@')[0],
       password: hash,
       phone: createUserDto.phone?.trim(),
@@ -225,6 +240,10 @@ export class AuthService {
     const hash = await bcrypt.hash(newPassword, salt);
 
     await this.usersService.updatePassword(userId, hash);
+    // Invalidate all existing sessions so the user must log in again
+    // with the new password. Refresh token is hashed in DB — clearing it
+    // prevents silent re-issue of access tokens after the change.
+    await this.usersService.updateRefreshToken(userId, null);
 
     return { message: 'Password changed successfully' };
   }
@@ -247,7 +266,16 @@ export class AuthService {
     const expires = new Date(Date.now() + 3600000); // 1 hour
 
     await this.usersService.setResetPasswordToken(email, hashedToken, expires);
-    await this.emailService.sendPasswordResetEmail(email, resetToken);
+    try {
+      await this.emailService.sendPasswordResetEmail(email, resetToken);
+    } catch {
+      // Don't leave a stale token behind, and don't surface a 500 with a
+      // stack trace — SMTP outages are a downstream failure (503), not a bug.
+      await this.usersService.clearResetToken(user._id.toString()).catch(() => undefined);
+      throw new ServiceUnavailableException(
+        'Email service is temporarily unavailable, please try again later',
+      );
+    }
 
     return {
       message: 'If the email exists, a password reset link has been sent',

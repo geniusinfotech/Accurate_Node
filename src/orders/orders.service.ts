@@ -431,6 +431,10 @@ export class OrdersService {
     if (updateTrackingDto.orderStatus) {
       order.orderStatus = updateTrackingDto.orderStatus;
     }
+    // COD: cash is collected on delivery, so delivered means paid.
+    if (order.orderStatus === 'delivered' && order.paymentStatus === 'pending') {
+      order.paymentStatus = 'paid';
+    }
     if (updateTrackingDto.courierName !== undefined) {
       order.courierName = updateTrackingDto.courierName;
     }
@@ -507,6 +511,11 @@ export class OrdersService {
   }
 
   async getSummary() {
+    // Prepaid orders count once paid; COD orders (paymentStatus stays 'pending') once delivered.
+    const isRevenue = (o: { orderStatus: string; paymentStatus: string }) =>
+      o.orderStatus !== 'cancelled' &&
+      (o.paymentStatus === 'paid' || o.orderStatus === 'delivered');
+
     const now = new Date();
     const startOfToday = new Date(
       now.getFullYear(),
@@ -538,7 +547,7 @@ export class OrdersService {
     let cancelledCount = 0;
 
     for (const o of allOrders) {
-      if (o.orderStatus !== 'cancelled' && o.paymentStatus === 'paid') {
+      if (isRevenue(o)) {
         totalWebRevenue += o.totalAmount || 0;
       }
       switch (o.orderStatus) {
@@ -562,7 +571,7 @@ export class OrdersService {
 
     let todayRevenue = 0;
     for (const o of todayOrders) {
-      if (o.orderStatus !== 'cancelled' && o.paymentStatus === 'paid') {
+      if (isRevenue(o)) {
         todayRevenue += o.totalAmount || 0;
       }
     }

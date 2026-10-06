@@ -242,3 +242,29 @@ describe('OrdersService payment confirmation', () => {
     expect(order.paymentStatus).toBe('pending');
   });
 });
+
+describe('OrdersService.getSummary revenue', () => {
+  const order = (totalAmount: number, orderStatus: string, paymentStatus: string) => ({
+    totalAmount,
+    orderStatus,
+    paymentStatus,
+  });
+
+  it('counts paid and delivered-COD orders, not cancelled or open COD', async () => {
+    const all = [
+      order(100, 'placed', 'paid'), // prepaid
+      order(200, 'delivered', 'pending'), // COD collected on delivery
+      order(400, 'placed', 'pending'), // COD not yet delivered
+      order(800, 'cancelled', 'paid'), // refunded/cancelled
+    ];
+    const orderModel: any = {
+      find: jest.fn(() => ({ exec: () => Promise.resolve(all) })),
+    };
+    const service = new OrdersService(orderModel, {} as any, {} as any);
+
+    const summary = await service.getSummary();
+
+    expect(summary.totalWebRevenue).toBe(300);
+    expect(summary.totalOrdersCount).toBe(4);
+  });
+});

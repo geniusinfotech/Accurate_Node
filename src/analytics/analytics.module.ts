@@ -6,7 +6,7 @@ import {
 } from './schemas/inventory-sales-analytics.schema';
 import { AnalyticsService } from './analytics.service';
 import { AnalyticsController } from './analytics.controller';
-import { ShopProductsModule } from '../shop-products/shop-products.module';
+import { ProductsModule } from '../products/products.module';
 
 @Module({
   imports: [
@@ -16,7 +16,7 @@ import { ShopProductsModule } from '../shop-products/shop-products.module';
         schema: InventorySalesAnalyticsSchema,
       },
     ]),
-    ShopProductsModule,
+    ProductsModule,
   ],
   controllers: [AnalyticsController],
   providers: [AnalyticsService],

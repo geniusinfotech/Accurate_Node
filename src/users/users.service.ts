@@ -1,5 +1,5 @@
 /* eslint-disable prettier/prettier */
-import { Injectable, NotFoundException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User, UserDocument } from './schema/user.schema';
@@ -61,7 +61,7 @@ export class UsersService {
   }
 
   async findAll(): Promise<User[]> {
-    return this.excludeSensitiveData(this.userModel.find().select('-resetPasswordToken -resetPasswordExpires -googleId -githubId'));
+    return this.excludeSensitiveData(this.userModel.find().select('-resetPasswordToken -resetPasswordExpires -refreshTokenHash -googleId -githubId'));
   }
 
   async remove(id: string): Promise<{ success: boolean; message: string }> {
@@ -160,6 +160,17 @@ export class UsersService {
     const user = await this.findById(userId);
     if (!user) return null;
     if (!user.addresses) user.addresses = [];
+    if (!addressData || typeof addressData !== 'object' || Array.isArray(addressData)) {
+      throw new BadRequestException('Invalid address');
+    }
+    // Reject prototype-pollution keys. NOTE: must use Object.keys — every
+    // object inherits `.constructor` via its prototype, so a truthiness check
+    // like `addressData.constructor` fires for ALL inputs.
+    for (const k of Object.keys(addressData)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
+        throw new BadRequestException('Invalid address');
+      }
+    }
     // Validate allowlist
     const allowedKeys = ['street', 'city', 'state', 'zip', 'country', 'isDefault', 'label', 'phone'];
     const clean: any = {};
@@ -169,9 +180,8 @@ export class UsersService {
         else if (typeof addressData[k] === 'boolean') clean[k] = addressData[k];
       }
     }
-    if (!clean.street || !clean.city) throw new Error('Street and city are required');
-    if (clean.zip && !/^[0-9A-Za-z\s-]{3,12}$/.test(clean.zip)) throw new Error('Invalid zip');
-    if (addressData.__proto__ || addressData.constructor || addressData.prototype) throw new Error('Invalid address');
+    if (!clean.street || !clean.city) throw new BadRequestException('Street and city are required');
+    if (clean.zip && !/^[0-9A-Za-z\s-]{3,12}$/.test(clean.zip)) throw new BadRequestException('Invalid zip');
     if (clean.isDefault || user.addresses.length === 0) {
       user.addresses.forEach((a) => (a.isDefault = false));
       clean.isDefault = true;

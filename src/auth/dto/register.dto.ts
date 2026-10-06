@@ -27,12 +27,21 @@ export class AddressDto {
 
 export class RegisterDto {
   @IsString()
-  @MinLength(3)
-  firstname: string;
+  @MinLength(2)
+  @IsOptional()
+  firstname?: string;
 
   @IsString()
-  @MinLength(3)
-  lastname: string;
+  @MinLength(2)
+  @IsOptional()
+  lastname?: string;
+
+  // Backwards-compat: storefront signup historically sent a single `name`.
+  // Whitelisted here so `forbidNonWhitelisted` doesn't reject it; the
+  // service splits it into firstname/lastname when those are absent.
+  @IsString()
+  @IsOptional()
+  name?: string;
 
   @IsString()
   @Matches(/^\+?[0-9\s\-()]{10,20}$/, { message: 'phone must be a valid phone number' })

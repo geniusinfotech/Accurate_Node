@@ -5,10 +5,21 @@ import { OrdersService } from '../orders/orders.service';
 import { CreatePaymentOrderDto } from './dto/create-payment-order.dto';
 import { APISuccess, APIError } from '../common/api-response';
 import { Throttle } from '@nestjs/throttler';
+import { IsNotEmpty, IsString } from 'class-validator';
 
+// Needs validators: the global ValidationPipe is whitelist + forbidNonWhitelisted,
+// so an undecorated class rejects every request with 400.
 class VerifyBody {
+  @IsString()
+  @IsNotEmpty()
   razorpay_order_id: string;
+
+  @IsString()
+  @IsNotEmpty()
   razorpay_payment_id: string;
+
+  @IsString()
+  @IsNotEmpty()
   razorpay_signature: string;
 }
 
@@ -63,12 +74,15 @@ export class PaymentController {
         },
       };
     } catch (err: any) {
-      if (err?.statusCode) throw err;
+      // Preserve our own APIErrors; map upstream Razorpay failures to 502
+      // (they are gateway problems, not internal bugs). Razorpay SDK errors
+      // carry statusCode (e.g. 401 on bad keys) — don't leak them as 500.
+      if (err instanceof APIError) throw err;
       const msg =
         err?.error?.description ||
         err?.message ||
         'Error creating Razorpay order';
-      throw APIError.internalServerError(msg, err);
+      throw APIError.badGateway(`Payment gateway error: ${msg}`, err);
     }
   }
 

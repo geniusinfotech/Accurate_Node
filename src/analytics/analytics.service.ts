@@ -5,7 +5,7 @@ import {
   InventorySalesAnalytics,
   InventorySalesAnalyticsDocument,
 } from './schemas/inventory-sales-analytics.schema';
-import { ShopProductsService } from '../shop-products/services/shop-products.service';
+import { ProductsService } from '../products/services/products.service';
 
 @Injectable()
 export class AnalyticsService {
@@ -14,7 +14,7 @@ export class AnalyticsService {
   constructor(
     @InjectModel(InventorySalesAnalytics.name)
     private analyticsModel: Model<InventorySalesAnalyticsDocument>,
-    private shopProductsService: ShopProductsService,
+    private productsService: ProductsService,
   ) {}
 
   async recordSale(
@@ -24,13 +24,11 @@ export class AnalyticsService {
     revenue: number,
   ) {
     try {
-      // Convert ObjectId instances to strings if needed
       const productIdStr =
         typeof productId === 'string' ? productId : productId.toString();
       const categoryIdStr =
         typeof categoryId === 'string' ? categoryId : categoryId.toString();
 
-      // Validate ObjectId format
       if (!Types.ObjectId.isValid(productIdStr)) {
         this.logger.error(
           `Invalid productId format in recordSale: ${productIdStr} (type: ${typeof productId})`,
@@ -81,7 +79,7 @@ export class AnalyticsService {
     const totalSold = stats.length > 0 ? stats[0].totalSold : 0;
     const avgDailySales = totalSold / 30;
     const expectedDemand = Math.ceil(avgDailySales * forecastDays);
-    const recommendedStock = Math.ceil(expectedDemand * 1.2); // 20% buffer
+    const recommendedStock = Math.ceil(expectedDemand * 1.2);
 
     return {
       productId,
@@ -112,9 +110,8 @@ export class AnalyticsService {
   }
 
   async getStockOutRisk() {
-    // This is complex. We need velocity for all products.
-    // Simplified: Look at all products with stock < 20 and calculate days left.
-    const products = await this.shopProductsService.findAllShopProducts();
+    const productsResult = await this.productsService.findAll({ limit: 1000 });
+    const products = productsResult.items;
     const riskReport: {
       productId: any;
       name: string;
@@ -124,7 +121,6 @@ export class AnalyticsService {
 
     for (const prod of products) {
       if (prod.stock < 20) {
-        // Cast to any to access _id if the Product type definition is missing it
         const productId = (prod as any)._id;
         const forecast = await this.getProductForecast(
           productId.toString(),
@@ -148,15 +144,11 @@ export class AnalyticsService {
   }
 
   async getInventorySummary() {
-    const totalProducts = await this.shopProductsService
-      .findAllShopProducts()
-      .then((products) => products.length);
-    const lowStockCount = await this.shopProductsService
-      .findAllShopProducts()
-      .then((products) => products.filter((p) => p.stock < 5).length);
-    const outOfStockCount = await this.shopProductsService
-      .findAllShopProducts()
-      .then((products) => products.filter((p) => p.stock === 0).length);
+    const productsResult = await this.productsService.findAll({ limit: 1000 });
+    const products = productsResult.items;
+    const totalProducts = products.length;
+    const lowStockCount = products.filter((p) => p.stock < 5).length;
+    const outOfStockCount = products.filter((p) => p.stock === 0).length;
 
     return {
       totalProducts,
@@ -165,8 +157,6 @@ export class AnalyticsService {
     };
   }
 
-  // Sales are recorded by the counter POS, which sells shop products, so every
-  // join here resolves against the shop catalogue — not the website one.
   async getTopSelling(limit: number = 10) {
     return this.analyticsModel.aggregate([
       {
@@ -180,7 +170,7 @@ export class AnalyticsService {
       { $limit: limit },
       {
         $lookup: {
-          from: 'shop_products',
+          from: 'products',
           localField: '_id',
           foreignField: '_id',
           as: 'product',
@@ -200,7 +190,6 @@ export class AnalyticsService {
   }
 
   async getSlowMoving(days: number = 60) {
-    // Find products with no sales in the last X days
     const dateLimit = new Date();
     dateLimit.setDate(dateLimit.getDate() - days);
 
@@ -208,9 +197,9 @@ export class AnalyticsService {
       date: { $gte: dateLimit },
     });
 
-    const allProducts = await this.shopProductsService.findAllShopProducts();
+    const productsResult = await this.productsService.findAll({ limit: 1000 });
+    const allProducts = productsResult.items;
 
-    // Filter products that are NOT in activeProductIds and have stock > 0
     const slowMoving = allProducts.filter(
       (p) =>
         !activeProductIds.find(

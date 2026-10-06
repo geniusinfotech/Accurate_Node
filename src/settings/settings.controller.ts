@@ -6,6 +6,7 @@ import {
   Post,
   Put,
   UseGuards,
+  NotFoundException,
 } from '@nestjs/common';
 import { SettingsService } from './settings.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -17,12 +18,16 @@ import { Role } from '../auth/roles.enum';
 import { Permission } from '../auth/permissions.enum';
 import { APISuccess } from '../common/api-response';
 
+const PUBLIC_SETTINGS = ['shipping'];
+
 @Controller('settings')
 export class SettingsController {
   constructor(private readonly settingsService: SettingsService) {}
 
+  // Public read: only keys the storefront needs. Anything else stays private.
   @Get(':key')
   async getSetting(@Param('key') key: string) {
+    if (!PUBLIC_SETTINGS.includes(key)) throw new NotFoundException();
     const value = await this.settingsService.getSetting(key);
     return APISuccess.ok({ key, value });
   }

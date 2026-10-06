@@ -65,6 +65,14 @@ export class APIError extends HttpException {
     return new APIError(HttpStatus.INTERNAL_SERVER_ERROR, responseMessage, undefined, body);
   }
 
+  static badGateway(responseMessage: string = 'Bad Gateway', body: Record<string, any> = {}) {
+    return new APIError(HttpStatus.BAD_GATEWAY, responseMessage, undefined, body);
+  }
+
+  static serviceUnavailable(responseMessage: string = 'Service Unavailable', body: Record<string, any> = {}) {
+    return new APIError(HttpStatus.SERVICE_UNAVAILABLE, responseMessage, undefined, body);
+  }
+
   static validationError(errors: any[], responseMessage: string = 'Validation failed') {
     return new APIError(HttpStatus.BAD_REQUEST, responseMessage, undefined, { errors });
   }

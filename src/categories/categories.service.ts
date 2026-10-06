@@ -53,12 +53,16 @@ export class CategoriesService {
         return createdCategory;
     }
 
-    async findAll(): Promise<Category[]> {
-        const cacheKey = 'categories:v1:all';
+    async findAll(filters?: { isActive?: boolean }): Promise<Category[]> {
+        const query = filters?.isActive !== undefined ? { isActive: filters.isActive } : {};
+        
+        const cacheKey = filters?.isActive !== undefined 
+          ? `categories:v1:all:isActive:${filters.isActive}` 
+          : 'categories:v1:all';
         const cached = await this.cache.get<Category[]>(cacheKey);
         if (cached) return cached;
 
-        const categories = await this.categoryModel.find();
+        const categories = await this.categoryModel.find(query);
         await this.cache.set(cacheKey, categories);
         return categories;
     }

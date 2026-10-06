@@ -6,6 +6,7 @@ import {
   Param,
   UseGuards,
   Patch,
+  Delete,
   Req,
 } from '@nestjs/common';
 import { Request } from 'express';
@@ -74,6 +75,23 @@ export class ManagersController {
     @Body('status') status: 'active' | 'inactive',
   ) {
     return this.managersService.createOrUpdateManager(userId, { status });
+  }
+
+  @Patch(':userId/password')
+  async resetPassword(
+    @Param('userId') userId: string,
+    @Body('password') password: string,
+  ) {
+    if (!/^[a-fA-F0-9]{24}$/.test(userId)) throw new Error('Invalid userId');
+    if (typeof password !== 'string' || password.length < 8)
+      throw new Error('Password must be at least 8 characters');
+    return this.managersService.resetPassword(userId, password);
+  }
+
+  @Delete(':userId')
+  async remove(@Param('userId') userId: string) {
+    if (!/^[a-fA-F0-9]{24}$/.test(userId)) throw new Error('Invalid userId');
+    return this.managersService.removeByUserId(userId);
   }
 
   @Get('me/config')

@@ -1,5 +1,6 @@
 /* eslint-disable prettier/prettier */
 import {
+  BadRequestException,
   Controller,
   Get,
   UseGuards,
@@ -68,7 +69,7 @@ export class UsersController {
   @Post('manager')
   async createManager(@Body() body: { email: string; password: string; firstname: string; lastname: string; phone?: string }) {
     if (!body?.email || !body?.password || !body?.firstname || !body?.lastname) {
-      throw new Error('Missing required fields');
+      throw new BadRequestException('Missing required fields');
     }
     const dto: any = {
       email: String(body.email).toLowerCase().trim(),
@@ -78,8 +79,8 @@ export class UsersController {
       phone: body.phone ? String(body.phone).trim() : undefined,
       roles: [Role.MANAGER],
     };
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(dto.email)) throw new Error('Invalid email');
-    if (dto.password.length < 8) throw new Error('Password must be at least 8 characters');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(dto.email)) throw new BadRequestException('Invalid email');
+    if (dto.password.length < 8) throw new BadRequestException('Password must be at least 8 characters');
     return this.usersService.createWithHash(dto);
   }
 
@@ -113,7 +114,7 @@ export class UsersController {
     if (typeof body?.name === 'string' && body.name.trim()) {
       const normalizedName = body.name.trim().replace(/\s+/g, ' ').slice(0, 100);
       if (!/^[A-Za-z\s.'-]+$/.test(normalizedName)) {
-        throw new Error('Invalid name format');
+        throw new BadRequestException('Invalid name format');
       }
       const [firstname, ...rest] = normalizedName.split(' ');
       updateData.firstname = firstname.slice(0, 50);
@@ -123,7 +124,7 @@ export class UsersController {
 
     if (typeof body?.phone === 'string' && body.phone.trim()) {
       const clean = body.phone.trim().replace(/\s+/g, '');
-      if (!/^\+?[0-9]{10,15}$/.test(clean)) throw new Error('Invalid phone');
+      if (!/^\+?[0-9]{10,15}$/.test(clean)) throw new BadRequestException('Invalid phone');
       updateData.phone = clean;
     }
 
@@ -145,8 +146,8 @@ export class UsersController {
         // Reject prototype pollution keys
         const allowed = ['street', 'city', 'state', 'zip', 'country'];
         for (const k of Object.keys(body.address)) {
-          if (!allowed.includes(k)) throw new Error(`Invalid address field: ${k}`);
-          if (k === '__proto__' || k === 'constructor' || k === 'prototype') throw new Error('Invalid address');
+          if (!allowed.includes(k)) throw new BadRequestException(`Invalid address field: ${k}`);
+          if (k === '__proto__' || k === 'constructor' || k === 'prototype') throw new BadRequestException('Invalid address');
         }
         updateData.address = {
           street: sanitize(body.address.street, existingAddress.street ?? ''),
@@ -156,24 +157,25 @@ export class UsersController {
           country: sanitize(body.address.country, existingAddress.country ?? ''),
         };
         if (updateData.address.zip && !/^[0-9A-Za-z\s-]{3,12}$/.test(updateData.address.zip)) {
-          throw new Error('Invalid zip');
+          throw new BadRequestException('Invalid zip');
         }
       }
     }
 
     if (typeof body?.avatar === 'string' && body.avatar.trim()) {
       const avatar = body.avatar.trim();
-      if (avatar.length > 2048) throw new Error('Avatar URL too long');
+      if (avatar.length > 2048) throw new BadRequestException('Avatar URL too long');
       // Only allow http(s) or relative path, block javascript: and data:html
-      if (/^\s*javascript:/i.test(avatar) || /^\s*data:text\/html/i.test(avatar)) throw new Error('Invalid avatar URL');
+      if (/^\s*javascript:/i.test(avatar) || /^\s*data:text\/html/i.test(avatar)) throw new BadRequestException('Invalid avatar URL');
       try {
         if (avatar.startsWith('http://') || avatar.startsWith('https://')) {
           new URL(avatar);
         } else if (!avatar.startsWith('/') && !avatar.startsWith('data:image/')) {
-          throw new Error('Invalid avatar');
+          throw new BadRequestException('Invalid avatar');
         }
-      } catch {
-        throw new Error('Invalid avatar URL');
+      } catch (e) {
+        if (e instanceof BadRequestException) throw e;
+        throw new BadRequestException('Invalid avatar URL');
       }
       updateData.avatar = avatar;
     }

@@ -10,37 +10,24 @@ import { Model } from 'mongoose';
 import * as ExcelJS from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
+import { extname } from 'path';
 import axios from 'axios';
 import { Product, ProductDocument } from '../schemas/product.schema';
-import {
-  ExcelUploadHistory,
-  ExcelUploadHistoryDocument,
-} from '../schemas/excel-upload-history.schema';
 import { CreateProductDto } from '../dto/create-product.dto';
 import { UpdateProductDto } from '../dto/update-product.dto';
 import { BrandsService } from './brands.service';
 import { CategoriesService } from '../../categories/categories.service';
-import { SemiFinishedStockService } from '../../manufacturing/semi-finished-stock/semi-finished-stock.service';
-import {
-  RawMaterial,
-  RawMaterialDocument,
-} from '../../manufacturing/raw-materials/schemas/raw-material.schema';
-import {
-  SemiFinishedStock,
-  SemiFinishedStockDocument,
-} from '../../manufacturing/semi-finished-stock/schemas/semi-finished-stock.schema';
 import { FileStorageUtil } from '../utils/file-storage.util';
 import { RedisCacheService } from '../../common/cache/cache.service';
 
-type RawMaterialNames = ProductDocument & { rawMaterialNames: string[] };
-
 type ProductListResult = {
-  products: RawMaterialNames[];
-  items: RawMaterialNames[];
+  products: ProductDocument[];
+  items: ProductDocument[];
   total: number;
   count: number;
   page: number;
   limit: number;
+  totalPages: number;
 };
 
 @Injectable()
@@ -49,1418 +36,377 @@ export class ProductsService {
 
   constructor(
     @InjectModel(Product.name) private productModel: Model<ProductDocument>,
-    @InjectModel(ExcelUploadHistory.name)
-    private excelHistoryModel: Model<ExcelUploadHistoryDocument>,
-    @InjectModel(RawMaterial.name)
-    private rawMaterialModel: Model<RawMaterialDocument>,
-    @InjectModel(SemiFinishedStock.name)
-    private stockModel: Model<SemiFinishedStockDocument>,
     private brandsService: BrandsService,
     private categoriesService: CategoriesService,
-    private semiFinishedStockService: SemiFinishedStockService,
     private cache: RedisCacheService,
   ) {}
 
-  /**
-   * Create a new product manually
-   */
+  private normalizeVariants(variants: any[] | undefined): any[] | undefined {
+    if (!Array.isArray(variants)) return variants;
+    const seenIds = new Set<string>();
+    return variants.map((v: any, i: number) => {
+      const out: any = { ...v };
+      // Parse "500 ml" / "1kg" weight labels into packSize + packUnit
+      if (
+        (out.packSize === undefined || out.packSize === null || out.packSize === '') &&
+        typeof out.weight === 'string' &&
+        out.weight.trim()
+      ) {
+        const m = out.weight
+          .trim()
+          .replace(/\s+/g, ' ')
+          .match(/^([\d.,]+)\s*([a-zA-Z]+)?/);
+        if (m) {
+          const size = parseFloat(m[1].replace(/,/g, ''));
+          let unit = (m[2] || 'ml').toLowerCase();
+          if (['g', 'gm', 'gms', 'gram', 'grams'].includes(unit)) unit = 'gm';
+          else if (['kgs', 'kilogram', 'kilograms'].includes(unit)) unit = 'kg';
+          else if (
+            ['ltr', 'ltrs', 'litre', 'liter', 'litres', 'liters', 'lt'].includes(unit)
+          )
+            unit = 'L';
+          else if (unit === 'l') unit = 'L';
+          else if (unit === 'mls') unit = 'ml';
+          if (!['ml', 'L', 'gm', 'kg'].includes(unit)) unit = 'ml';
+          if (Number.isFinite(size) && size > 0) {
+            out.packSize = size;
+            out.packUnit = unit;
+          }
+        }
+      }
+      // Backfill weight label so storefront can display it
+      if (!out.weight && out.packSize && out.packUnit) {
+        out.weight = `${out.packSize} ${out.packUnit}`;
+      }
+      if (!out.variantId) {
+        out.variantId = `VAR-${Date.now().toString(36).toUpperCase()}${i}`;
+      }
+      // De-duplicate variantIds within the product so stored data stays unique
+      // (heals rows previously saved with identical generated ids).
+      let baseId = String(out.variantId);
+      let suffix = 1;
+      while (seenIds.has(baseId)) {
+        baseId = `${out.variantId}-${suffix++}`;
+      }
+      out.variantId = baseId;
+      seenIds.add(baseId);
+      if (typeof out.sku === 'string') {
+        out.sku = out.sku.trim().toUpperCase();
+      }
+      if (out.price !== undefined) out.price = Number(out.price);
+      if (out.mrp !== undefined && out.mrp !== null && out.mrp !== '') {
+        out.mrp = Number(out.mrp);
+      } else {
+        delete out.mrp;
+      }
+      if (out.stock !== undefined) out.stock = Number(out.stock);
+      if (out.isActive === undefined) out.isActive = true;
+      return out;
+    });
+  }
+
   async create(dto: CreateProductDto): Promise<ProductDocument> {
-    // Validate brand exists
     if (dto.brandId) {
       await this.brandsService.findById(dto.brandId);
     }
 
-    // Validate category exists
     await this.categoriesService.findById(dto.categoryId);
 
-    // Check if SKU already exists
     const existingProduct = await this.productModel.findOne({ sku: dto.sku });
     if (existingProduct) {
       throw new ConflictException(`Product with SKU ${dto.sku} already exists`);
     }
 
-    const status = dto.status;
-    if (status === 'published') {
-      if (!dto.sourceStockId) {
-        throw new BadRequestException(
-          'sourceStockId is required to publish a product',
-        );
-      }
-      const stock = await this.semiFinishedStockService.findOne(
-        dto.sourceStockId,
-      );
-      if (stock.status !== 'completed' && stock.status !== 'ready') {
-        throw new BadRequestException(
-          'Associated stock must be in completed or ready status to publish',
-        );
-      }
-    }
+    const status = dto.status || 'published';
 
-    let productLotId = dto.lotId;
-    if (!productLotId && dto.sourceStockId) {
-      try {
-        const sourceStock = await this.semiFinishedStockService.findOne(
-          dto.sourceStockId,
-        );
-        if (sourceStock?.lotId) {
-          productLotId = sourceStock.lotId;
-        }
-      } catch (err) {
-        // non-critical
-      }
-    }
-
-    // Merge any user-supplied tags with inferred gifting tags
-    const inferredTags = this.inferGiftingTags(dto.name, dto.description);
-    const mergedTags = [...new Set([...(dto.tags ?? []), ...inferredTags])];
+    const normalizedVariants = this.normalizeVariants(dto.variants as any);
 
     const product = new this.productModel({
       ...dto,
-      tags: mergedTags,
-      lotId: productLotId,
-      reservedStock: 0,
-      isActive: dto.isActive !== undefined ? dto.isActive : true,
-      status: status,
+      variants: normalizedVariants,
+      status,
+    });
+    return product.save();
+  }
+
+  async findAll(filters: any = {}): Promise<ProductListResult> {
+    const {
+      page = 1,
+      limit = 12,
+      brandId,
+      categoryId,
+      isActive,
+      status,
+      includeUnpublished,
+      search,
+      minPrice,
+      maxPrice,
+      sort,
+      ...rest
+    } = filters;
+
+    const query: any = {};
+
+    if (brandId) query.brandId = brandId;
+    if (categoryId) query.categoryId = categoryId;
+    if (isActive !== undefined) query.isActive = isActive;
+    if (status) query.status = status;
+    if (!includeUnpublished) query.status = 'published';
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { sku: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    if (minPrice !== undefined || maxPrice !== undefined) {
+      query.price = {};
+      if (minPrice !== undefined) query.price.$gte = minPrice;
+      if (maxPrice !== undefined) query.price.$lte = maxPrice;
+    }
+
+    Object.keys(rest).forEach((key) => {
+      if (rest[key] !== undefined) query[key] = rest[key];
     });
 
-    const saved = await product.save();
+    const skip = (page - 1) * limit;
+    const sortOption = this.getSortOption(sort);
 
-    if (dto.sourceStockId) {
+    const [items, total] = await Promise.all([
+      this.productModel.find(query).sort(sortOption).skip(skip).limit(limit).populate('category', 'name').exec(),
+      this.productModel.countDocuments(query).exec(),
+    ]);
+
+    return {
+      products: items,
+      items,
+      total,
+      count: items.length,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  getSortOption(sort?: string): any {
+    switch (sort) {
+      case 'price_asc':
+        return { price: 1 };
+      case 'price_desc':
+        return { price: -1 };
+      case 'newest':
+        return { createdAt: -1 };
+      default:
+        return { createdAt: -1 };
+    }
+  }
+
+  async findById(
+    id: string,
+    options: { includeUnpublished?: boolean } = {},
+  ): Promise<ProductDocument> {
+    const query: any = { _id: id };
+    if (!options.includeUnpublished) {
+      query.status = 'published';
+    }
+    const product = await this.productModel.findOne(query).populate('category', 'name').exec();
+    if (!product) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+    return product;
+  }
+
+  async update(id: string, dto: UpdateProductDto): Promise<ProductDocument> {
+    const payload: any = { ...dto };
+    if (payload.variants !== undefined) {
+      payload.variants = this.normalizeVariants(payload.variants);
+    }
+    const product = await this.productModel
+      .findByIdAndUpdate(id, payload, { new: true })
+      .exec();
+    if (!product) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+    return product;
+  }
+
+  async delete(id: string): Promise<void> {
+    const result = await this.productModel.findByIdAndDelete(id).exec();
+    if (!result) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+  }
+
+  async uploadImages(id: string, files: Express.Multer.File[]): Promise<ProductDocument> {
+    const imageUrls: string[] = [];
+    const uploadDir = './uploads/images/products';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    for (const file of files) {
+      const filename = `product-${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(file.originalname).toLowerCase()}`;
+      const destPath = path.join(uploadDir, filename);
+      fs.renameSync(file.path, destPath);
+      imageUrls.push(`/uploads/images/products/${filename}`);
+    }
+
+    const product = await this.productModel
+      .findByIdAndUpdate(id, { $push: { images: { $each: imageUrls } } }, { new: true })
+      .exec();
+    if (!product) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+    return product;
+  }
+
+  async uploadVariantImages(
+    id: string,
+    variantKey: string,
+    files: Express.Multer.File[],
+  ): Promise<ProductDocument> {
+    if (!files || files.length === 0) {
+      throw new BadRequestException('At least one image is required');
+    }
+    const imageUrls: string[] = [];
+    const uploadDir = './uploads/images/products';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    for (const file of files) {
+      const filename = `product-${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(file.originalname).toLowerCase()}`;
+      const destPath = path.join(uploadDir, filename);
+      fs.renameSync(file.path, destPath);
+      imageUrls.push(`/uploads/images/products/${filename}`);
+    }
+
+    const product = await this.productModel.findById(id).exec();
+    if (!product) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+    const needle = String(variantKey || '').trim().toUpperCase();
+    const variant = ((product as any).variants || []).find(
+      (v: any) =>
+        String(v.sku || '').toUpperCase() === needle ||
+        String(v.variantId || '').toUpperCase() === needle,
+    );
+    if (!variant) {
+      throw new NotFoundException(
+        `Variant ${variantKey} not found on product ${id}`,
+      );
+    }
+    variant.images = [...(variant.images || []), ...imageUrls].slice(0, 10);
+    await product.save();
+    return product;
+  }
+
+  async downloadExternalImages(id: string, imageUrls: string[]): Promise<ProductDocument> {
+    const downloadedUrls: string[] = [];
+    const uploadDir = './uploads/images/products';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    for (const url of imageUrls) {
       try {
-        await this.semiFinishedStockService.update(dto.sourceStockId, {
-          status: 'published',
-        } as any);
-      } catch (err) {
-        // non-critical: product created even if stock status update fails
-        console.error('Failed to mark stock as published:', err);
+        const response = await axios.get(url, { responseType: 'arraybuffer' });
+        const contentType = Array.isArray(response.headers['content-type'])
+          ? response.headers['content-type'][0]
+          : response.headers['content-type'];
+        const contentTypeStr = typeof contentType === 'string' ? contentType : '';
+        const ext = contentTypeStr.includes('png') ? '.png' : contentTypeStr.includes('webp') ? '.webp' : '.jpg';
+        const filename = `product-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+        const destPath = path.join(uploadDir, filename);
+        const buffer = Buffer.from(response.data);
+        fs.writeFileSync(destPath, buffer);
+        downloadedUrls.push(`/uploads/images/products/${filename}`);
+      } catch (error) {
+        this.logger.error(`Failed to download image from ${url}: ${error.message}`);
       }
     }
 
-    await this.cache.delByPrefix('products:');
-    return saved;
+    const product = await this.productModel
+      .findByIdAndUpdate(id, { $push: { images: { $each: downloadedUrls } } }, { new: true })
+      .exec();
+    if (!product) {
+      throw new NotFoundException(`Product with ID ${id} not found`);
+    }
+    return product;
   }
 
-  /**
-   * Bulk upload products from Excel file
-   */
   async bulkUploadFromExcel(
     file: Express.Multer.File,
     brandId: string,
     categoryId: string,
     userId: string,
-  ): Promise<{
-    created: number;
-    failed: number;
-    errors: Array<{ row: number; error: string }>;
-  }> {
-    const errors: Array<{ row: number; error: string }> = [];
-    let created = 0;
-    let failed = 0;
+  ): Promise<any> {
+    const workbook = new ExcelJS.Workbook();
+    const buffer = Buffer.isBuffer(file.buffer) 
+      ? file.buffer 
+      : Buffer.from(file.buffer as unknown as ArrayBuffer);
+    await workbook.xlsx.load(buffer as any);
 
-    try {
-      this.assertAllowedMagicBytes(file.path, ['excel']);
+    const worksheet = workbook.worksheets[0];
+    const results = { created: 0, updated: 0, errors: [] as string[] };
+    const rows: any[] = [];
 
-      // Validate brand and category exist
-      const brand = await this.brandsService.findById(brandId);
-      const category = await this.categoriesService.findById(categoryId);
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      rows.push({ row, rowNumber });
+    });
 
-      // Parse Excel file using ExcelJS
-      const workbook = new ExcelJS.Workbook();
-      await workbook.xlsx.readFile(file.path);
+    for (const { row, rowNumber } of rows) {
+      const name = row.getCell(1)?.value?.toString()?.trim();
+      const sku = row.getCell(2)?.value?.toString()?.trim();
+      const price = parseFloat(row.getCell(3)?.value?.toString() || '0');
+      const stock = parseInt(row.getCell(4)?.value?.toString() || '0', 10);
+      const description = row.getCell(5)?.value?.toString()?.trim() || '';
 
-      const worksheet = workbook.worksheets[0];
-      if (!worksheet) {
-        fs.unlinkSync(file.path);
-        throw new BadRequestException('Excel file has no worksheets');
+      if (!name || !sku || price <= 0) {
+        results.errors.push(`Row ${rowNumber}: Invalid data`);
+        continue;
       }
 
-      // Extract headers from the first row
-      const headers: string[] = [];
-      const headerRow = worksheet.getRow(1);
-      if (headerRow.cellCount === 0) {
-        fs.unlinkSync(file.path);
-        throw new BadRequestException('Excel file is empty');
-      }
-
-      headerRow.eachCell((cell, colNumber) => {
-        headers[colNumber] = cell.text ? cell.text.toString().trim() : '';
-      });
-
-      // Count actual data rows (excluding header)
-      const rowCount = worksheet.rowCount - 1;
-
-      // Enforce 10000 product limit
-      if (rowCount > 10000) {
-        fs.unlinkSync(file.path);
-        throw new BadRequestException(
-          'Maximum 10000 products allowed per upload',
-        );
-      }
-
-      if (rowCount <= 0) {
-        fs.unlinkSync(file.path);
-        throw new BadRequestException('Excel file is empty of data');
-      }
-
-      // Validate column headers
-      const headerValues = headers.filter(Boolean);
-      const requiredFields = ['name', 'price', 'stock'];
-      const missingHeaders = requiredFields.filter(
-        (field) => !headerValues.some((h) => h.toLowerCase().trim() === field),
-      );
-      if (missingHeaders.length > 0) {
-        fs.unlinkSync(file.path);
-        throw new BadRequestException(
-          `Missing required columns in header row: ${missingHeaders.join(', ')}`,
-        );
-      }
-
-      // Parse all rows first
-      const parsedRows: Array<{ rowIndex: number; data: any }> = [];
-      for (let i = 2; i <= worksheet.rowCount; i++) {
-        const row = worksheet.getRow(i);
-        if (row.hasValues) {
-          const rowData: any = {};
-          headers.forEach((header, index) => {
-            if (header && index > 0) {
-              const cell = row.getCell(index);
-              const normalizedValue = this.normalizeCellValue(cell);
-              rowData[header] = normalizedValue;
-            }
-          });
-          parsedRows.push({
-            rowIndex: i,
-            data: this.normalizeObjectKeys(rowData),
-          });
-        }
-      }
-
-      // --- Pre-validation phase: validate ALL rows before creating any ---
-      const validatedRows: Array<{
-        rowIndex: number;
-        data: any;
-        errors: string[];
-      }> = [];
-      const fileSkus = new Map<string, number>();
-
-      for (const { rowIndex, data } of parsedRows) {
-        const rowErrors: string[] = [];
-
-        // Check required fields (with whitespace trimming)
-        const missingFields = requiredFields.filter((field) => {
-          const val = data[field];
-          if (val === undefined || val === null) return true;
-          if (typeof val === 'string' && val.trim() === '') return true;
-          return false;
-        });
-        if (missingFields.length > 0) {
-          rowErrors.push(
-            `Missing required fields: ${missingFields.join(', ')}`,
-          );
-        }
-
-        // Validate name
-        const name = data.name ? data.name.toString().trim() : '';
-        if (!name) {
-          if (!missingFields.includes('name')) {
-            rowErrors.push('Product name cannot be empty');
-          }
-        } else if (name.length > 500) {
-          rowErrors.push('Product name must be 500 characters or less');
-        }
-
-        // Validate price
-        if (
-          data.price !== undefined &&
-          data.price !== '' &&
-          data.price !== null
-        ) {
-          const priceNum = parseFloat(data.price);
-          if (isNaN(priceNum)) {
-            rowErrors.push('Price must be a valid number');
-          } else if (priceNum <= 0) {
-            rowErrors.push('Price must be greater than zero');
-          } else if (priceNum > 999999999) {
-            rowErrors.push('Price is too large');
-          }
-        }
-
-        // Validate stock
-        if (
-          data.stock !== undefined &&
-          data.stock !== '' &&
-          data.stock !== null
-        ) {
-          const stockNum = parseInt(data.stock, 10);
-          if (isNaN(stockNum)) {
-            rowErrors.push('Stock must be a valid integer');
-          } else if (stockNum < 0) {
-            rowErrors.push('Stock cannot be negative');
-          } else if (stockNum > 999999999) {
-            rowErrors.push('Stock value is too large');
-          }
-        }
-
-        // Validate discount (0-100)
-        if (
-          data.discount !== undefined &&
-          data.discount !== '' &&
-          data.discount !== null
-        ) {
-          const discountNum = parseFloat(data.discount);
-          if (isNaN(discountNum)) {
-            rowErrors.push('Discount must be a valid number');
-          } else if (discountNum < 0 || discountNum > 100) {
-            rowErrors.push('Discount must be between 0 and 100');
-          }
-        }
-
-        // Auto-generate SKU if not provided
-        if (!data.sku && name) {
-          data.sku = this.generateSku(name, rowIndex);
-        }
-
-        // Validate SKU
-        if (data.sku) {
-          const skuStr = data.sku.toString().trim();
-          data.sku = skuStr;
-          if (skuStr.length > 200) {
-            rowErrors.push('SKU must be 200 characters or less');
-          }
-        }
-
-        validatedRows.push({ rowIndex, data, errors: rowErrors });
-      }
-
-      // Check for duplicate SKUs within the file
-      const skuCountMap = new Map<string, number[]>();
-      for (const { rowIndex, data } of parsedRows) {
-        if (data.sku) {
-          const sku = data.sku.toString().trim();
-          if (!skuCountMap.has(sku)) {
-            skuCountMap.set(sku, []);
-          }
-          skuCountMap.get(sku)!.push(rowIndex);
-        }
-      }
-      for (const [sku, rows] of skuCountMap.entries()) {
-        if (rows.length > 1) {
-          for (const rowIndex of rows) {
-            const vr = validatedRows.find((v) => v.rowIndex === rowIndex);
-            if (vr) {
-              vr.errors.push(
-                `Duplicate SKU "${sku}" found in the file (also appears in rows: ${rows.filter((r) => r !== rowIndex).join(', ')})`,
-              );
-            }
-          }
-        }
-      }
-
-      // Check for SKUs already existing in the database
-      const allSkus = parsedRows
-        .map((r) => r.data.sku?.toString().trim())
-        .filter(Boolean);
-      const uniqueSkus = [...new Set<string>(allSkus)];
-      if (uniqueSkus.length > 0) {
-        const existingSkus = await this.productModel
-          .find({ sku: { $in: uniqueSkus } })
-          .select('sku')
-          .lean()
-          .exec();
-        const existingSkuSet = new Set(existingSkus.map((p: any) => p.sku));
-        for (const { rowIndex, data } of parsedRows) {
-          if (data.sku && existingSkuSet.has(data.sku.toString().trim())) {
-            const vr = validatedRows.find((v) => v.rowIndex === rowIndex);
-            if (vr) {
-              vr.errors.push(
-                `SKU "${data.sku}" already exists in the database`,
-              );
-            }
-          }
-        }
-      }
-
-      // Separate valid and invalid rows
-      const validRows = validatedRows.filter((v) => v.errors.length === 0);
-      const invalidRows = validatedRows.filter((v) => v.errors.length > 0);
-
-      // Move file to organized storage (shared by both success and failure paths)
-      const failedDir = invalidRows.length > 0 ? 'failed' : '';
-      const storageBasePath = FileStorageUtil.getExcelStoragePath(
-        brand.code,
-        category.slug,
-      );
-      const storagePath = failedDir
-        ? path.join(storageBasePath, failedDir)
-        : storageBasePath;
-      const newFileName = FileStorageUtil.generateUniqueFilename(
-        file.originalname,
-      );
-      const newFilePath = path.join(storagePath, newFileName);
-      fs.mkdirSync(path.dirname(newFilePath), { recursive: true });
-      fs.renameSync(file.path, newFilePath);
-
-      // Build validation error entries for DB
-      const validationErrors = invalidRows.map((v) => ({
-        row: v.rowIndex,
-        error: v.errors.join('; '),
-      }));
-
-      this.logger.log(
-        `Excel upload: ${parsedRows.length} parsed, ${validRows.length} valid, ${invalidRows.length} invalid`,
-      );
-
-      // --- Creation phase: create all valid rows ---
-      for (const { rowIndex, data } of validRows) {
-        try {
-          const { name, sku, price, stock, description, discount, ...specs } =
-            data;
-
-          const nameStr = name ? name.toString().trim() : '';
-          const priceNum = price !== undefined ? parseFloat(price) : 0;
-          const stockNum = stock !== undefined ? parseInt(stock, 10) : 0;
-          const discountNum = discount ? parseFloat(discount) : 0;
-
-          if (!nameStr) {
-            throw new Error('Product name is empty after trimming');
-          }
-          if (isNaN(priceNum) || priceNum <= 0) {
-            throw new Error(`Invalid price: ${price}`);
-          }
-          if (isNaN(stockNum) || stockNum < 0) {
-            throw new Error(`Invalid stock: ${stock}`);
-          }
-          if (isNaN(discountNum) || discountNum < 0 || discountNum > 100) {
-            throw new Error(`Invalid discount: ${discount}`);
-          }
-
-          const finalSku = sku ? sku.toString().trim() : '';
-
-          if (!finalSku) {
-            throw new Error('SKU could not be generated');
-          }
-          if (finalSku.length > 200) {
-            throw new Error('Generated SKU exceeds 200 characters');
-          }
-
-          const descStr = description ? description.toString().trim() : '';
-
-          // Infer gifting tags from name and description
-          const rowTagsRaw: string[] = data.tags
-            ? typeof data.tags === 'string'
-              ? data.tags
-                  .split(',')
-                  .map((t: string) => t.trim())
-                  .filter(Boolean)
-              : Array.isArray(data.tags)
-                ? data.tags
-                : []
-            : [];
-          const inferredRowTags = this.inferGiftingTags(nameStr, descStr);
-          const rowTags = [...new Set([...rowTagsRaw, ...inferredRowTags])];
-
-          const product = new this.productModel({
-            name: nameStr,
-            sku: finalSku,
-            price: priceNum,
-            stock: stockNum,
+      try {
+        const existing = await this.productModel.findOne({ sku }).exec();
+        if (existing) {
+          existing.name = name;
+          existing.price = price;
+          existing.stock = stock;
+          existing.description = description;
+          await existing.save();
+          results.updated++;
+        } else {
+          await this.productModel.create({
+            name,
+            sku,
+            price,
+            stock,
+            description,
             brandId,
             categoryId,
-            description: descStr,
-            discount: discountNum,
-            tags: rowTags,
-            specs: specs || {},
-            reservedStock: 0,
-            isActive: true,
             status: 'pending',
+            isActive: true,
           });
-
-          await product.save();
-          created++;
-        } catch (error) {
-          failed++;
-          const msg = error instanceof Error ? error.message : 'Unknown error';
-          this.logger.warn(`Row ${rowIndex} creation failed: ${msg}`);
-          errors.push({
-            row: rowIndex,
-            error: msg,
-          });
+          results.created++;
         }
-      }
-
-      this.logger.log(
-        `Excel upload complete: ${created} created, ${failed} failed`,
-      );
-
-      // Save upload history (records both created count and validation errors)
-      const history = new this.excelHistoryModel({
-        brandId,
-        categoryId,
-        fileName: file.originalname,
-        filePath: newFilePath,
-        uploadedBy: userId,
-        uploadedProducts: created,
-        failedCount: validationErrors.length + failed,
-        status: created > 0 ? 'completed' : 'validated',
-        validationErrors: [...validationErrors, ...errors],
-      });
-      await history.save();
-
-      if (created > 0) {
-        await this.cache.delByPrefix('products:');
-      }
-
-      return {
-        created,
-        failed: validationErrors.length + failed,
-        errors: [...validationErrors, ...errors],
-      };
-    } catch (error) {
-      // Clean up file on error
-      if (fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Normalize a single cell value from ExcelJS
-   */
-  private normalizeCellValue(cell: ExcelJS.Cell): any {
-    if (!cell || cell.value === null || cell.value === undefined) {
-      return '';
-    }
-
-    // Handle Rich Text (array of objects with 'text' property)
-    if (typeof cell.value === 'object' && 'richText' in cell.value) {
-      return (cell.value as any).richText.map((rt: any) => rt.text).join('');
-    }
-
-    // Handle Hyperlinks
-    if (
-      typeof cell.value === 'object' &&
-      'text' in cell.value &&
-      'hyperlink' in cell.value
-    ) {
-      return (cell.value as any).text;
-    }
-
-    // Handle Formulas (ExcelJS returns object with { formula, result })
-    if (typeof cell.value === 'object' && 'formula' in cell.value) {
-      return (cell.value as any).result; // We want the calculated result
-    }
-
-    // Handle dates
-    if (cell.type === ExcelJS.ValueType.Date) {
-      return cell.value.toString();
-    }
-
-    return cell.value.toString();
-  }
-
-  /**
-   * Normalize object keys (lowercase and trim)
-   */
-  private normalizeObjectKeys(row: any): any {
-    const normalized: any = {};
-    for (const key in row) {
-      const normalizedKey = key.toLowerCase().trim();
-      normalized[normalizedKey] = row[key];
-    }
-    return normalized;
-  }
-
-  private escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  private addRegexOrFilter(query: any, paths: string[], value?: string) {
-    if (!value) return;
-
-    const regex = new RegExp(this.escapeRegex(value), 'i');
-    const clauses = paths.map((path) => ({ [path]: regex }));
-
-    if (query.$or) {
-      query.$and = [
-        ...(query.$and || []),
-        { $or: query.$or },
-        { $or: clauses },
-      ];
-      delete query.$or;
-      return;
-    }
-
-    query.$and = [...(query.$and || []), { $or: clauses }];
-  }
-
-  private normalizeFilterValue(value: unknown): string | null {
-    if (value === null || value === undefined) return null;
-
-    const normalized = String(value).replace(/\s+/g, ' ').trim();
-
-    return normalized.length > 0 ? normalized : null;
-  }
-
-  private addOption(
-    target: Set<string>,
-    product: any,
-    topLevelKeys: string[],
-    specKeys: string[],
-  ) {
-    for (const key of topLevelKeys) {
-      const value = this.normalizeFilterValue(product[key]);
-      if (value) target.add(value);
-    }
-
-    const specs = product.specs || {};
-    for (const key of specKeys) {
-      const value = this.normalizeFilterValue(specs[key]);
-      if (value) target.add(value);
-    }
-  }
-
-  private sortOptions(values: Set<string>): string[] {
-    return [...values].sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }),
-    );
-  }
-
-  private generateSku(name: string, rowIndex: number): string {
-    const prefix = name
-      .replace(/[^a-zA-Z0-9\u0600-\u06FF\s]/g, '')
-      .trim()
-      .replace(/\s+/g, '-')
-      .toUpperCase()
-      .slice(0, 5);
-
-    const suffix = `${rowIndex}${Date.now().toString(36).slice(-3)}`;
-    return `${prefix}-${suffix}`;
-  }
-
-  private assertAllowedMagicBytes(
-    filePath: string,
-    allowedTypes: Array<'image' | 'excel'>,
-  ) {
-    const buffer = Buffer.alloc(12);
-    const fd = fs.openSync(filePath, 'r');
-    try {
-      fs.readSync(fd, buffer, 0, 12, 0);
-    } finally {
-      fs.closeSync(fd);
-    }
-
-    const hex = buffer.toString('hex');
-    const isJpeg = hex.startsWith('ffd8ff');
-    const isPng = hex.startsWith('89504e470d0a1a0a');
-    const isGif = hex.startsWith('47494638');
-    const isWebp =
-      buffer.slice(0, 4).toString('ascii') === 'RIFF' &&
-      buffer.slice(8, 12).toString('ascii') === 'WEBP';
-    const isZipBasedExcel = hex.startsWith('504b0304');
-    const isLegacyExcel = hex.startsWith('d0cf11e0a1b11ae1');
-
-    const isAllowed =
-      (allowedTypes.includes('image') &&
-        (isJpeg || isPng || isGif || isWebp)) ||
-      (allowedTypes.includes('excel') && (isZipBasedExcel || isLegacyExcel));
-
-    if (!isAllowed) {
-      throw new BadRequestException(
-        'Uploaded file content does not match the expected file type',
-      );
-    }
-  }
-
-  /**
-   * Infer gifting audience tags from product name and description.
-   * Returns any subset of: "for her", "for him", "couple", "kids", "sister", "friends".
-   */
-  private inferGiftingTags(name?: string, description?: string): string[] {
-    const text = `${name ?? ''} ${description ?? ''}`.toLowerCase();
-    const tags: string[] = [];
-
-    // "for her" — feminine jewellery keywords
-    if (
-      /\b(her|women|woman|lady|ladies|girl|girls|bride|bridal|feminine|necklace|earring|bangle|maang\s*tikka|nose\s*pin|anklet|mangalsutra|choker|jhumka|jhumki)\b/.test(
-        text,
-      )
-    ) {
-      tags.push('for her');
-    }
-
-    // "for him" — masculine keywords
-    if (
-      /\b(him|men|man|groom|male|masculine|bracelet for men|chain for men|rudraksha|kada|pendant for men|ring for men)\b/.test(
-        text,
-      )
-    ) {
-      tags.push('for him');
-    }
-
-    // "couple" — couple/pair keywords
-    if (
-      /\b(couple|pair|his\s*&?\s*her|matching set|duo|together)\b/.test(text)
-    ) {
-      tags.push('couple');
-    }
-
-    // "kids" — children keywords
-    if (
-      /\b(kids|child|children|baby|toddler|infant|girl child|boy child|school)\b/.test(
-        text,
-      )
-    ) {
-      tags.push('kids');
-    }
-
-    // "sister" — explicit sister / rakhi keywords
-    if (/\b(sister|sis|rakhi|rakshabandhan|raksha\s*bandhan)\b/.test(text)) {
-      tags.push('sister');
-    }
-
-    // "friends" — friendship / bestie keywords
-    if (/\b(friend|friends|bestie|bff|friendship|buddy|pal)\b/.test(text)) {
-      tags.push('friends');
-    }
-
-    return tags;
-  }
-
-  private buildFindAllCacheKey(
-    filters: any,
-    page: number,
-    limit: number,
-  ): string {
-    const key = {
-      page,
-      limit,
-      brandId: filters?.brandId || '',
-      categoryId: filters?.categoryId || '',
-      search: filters?.search || '',
-      sort: filters?.sort || '',
-      minPrice: filters?.minPrice ?? '',
-      maxPrice: filters?.maxPrice ?? '',
-      isPremium: filters?.isPremium ?? '',
-      processor: filters?.processor || '',
-      ssd: filters?.ssd || '',
-      ram: filters?.ram || '',
-      gpuType: filters?.gpuType || '',
-      gpuMemory: filters?.gpuMemory || '',
-      displaySize: filters?.displaySize || '',
-      isTouchScreen: filters?.isTouchScreen ?? '',
-    };
-    return JSON.stringify(key);
-  }
-
-  /**
-   * Find all products with filters and pagination
-   */
-  async findAll(filters?: {
-    brandId?: string;
-    categoryId?: string;
-    isActive?: boolean;
-    status?: string;
-    includeUnpublished?: boolean;
-    search?: string;
-    page?: number;
-    limit?: number;
-    minPrice?: number;
-    maxPrice?: number;
-    processor?: string;
-    ssd?: string;
-    ram?: string;
-    gpuType?: string;
-    gpuMemory?: string;
-    displaySize?: string;
-    isTouchScreen?: boolean;
-    isPremium?: boolean;
-    sort?: string;
-  }): Promise<{
-    products: ProductDocument[];
-    items: ProductDocument[];
-    total: number;
-    count: number;
-    page: number;
-    limit: number;
-  }> {
-    const page = filters?.page || 1;
-    const hardCap = filters?.includeUnpublished ? 1000 : 50;
-    const limit = Math.min(filters?.limit || 12, hardCap); // enforce cap
-    const skip = (page - 1) * limit;
-
-    // Serve public catalog reads from Redis to reduce DB load.
-    // Privileged/admin requests (includeUnpublished / explicit status) bypass caching.
-    const cacheable = Boolean(
-      filters &&
-      !filters.includeUnpublished &&
-      !filters.status &&
-      !filters.isActive,
-    );
-    const cacheKey =
-      'products:v1:' + this.buildFindAllCacheKey(filters, page, limit);
-    if (cacheable) {
-      const cached = await this.cache.get<ProductListResult>(cacheKey);
-      if (cached) return cached;
-    }
-
-    const query: any = {};
-
-    if (filters?.brandId) {
-      const raw = String(filters.brandId);
-      const brandIds = raw
-        .split(',')
-        .map((s) => s.trim())
-        .filter((s) => /^[a-fA-F0-9]{24}$/.test(s));
-      if (brandIds.length > 0) {
-        query.brandId = { $in: brandIds };
+      } catch (error) {
+        results.errors.push(`Row ${rowNumber}: ${error.message}`);
       }
     }
-    if (filters?.categoryId) {
-      const raw = String(filters.categoryId);
-      const categoryIds = raw
-        .split(',')
-        .map((s) => s.trim())
-        .filter((s) => /^[a-fA-F0-9]{24}$/.test(s));
-      if (categoryIds.length > 0) {
-        query.categoryId = { $in: categoryIds };
-      }
-    }
-    if (filters?.isActive !== undefined) query.isActive = filters.isActive;
-    if (filters?.isPremium !== undefined) query.isPremium = filters.isPremium;
-    const normalizedStatus = filters?.status?.toLowerCase();
-    if (normalizedStatus === 'pending' || normalizedStatus === 'published') {
-      query.status = normalizedStatus;
-    } else if (!filters?.includeUnpublished) {
-      query.status = 'published';
-    }
-    if (filters?.search) {
-      const searchRegex = new RegExp(this.escapeRegex(filters.search), 'i');
-      query.$or = [
-        { name: searchRegex },
-        { sku: searchRegex },
-        { description: searchRegex },
-        { gpuType: searchRegex },
-        { gpuMemory: searchRegex },
-        { 'specs.processor': searchRegex },
-        { 'specs.cpu': searchRegex },
-        { 'specs.gpu': searchRegex },
-        { 'specs.graphics': searchRegex },
-        { 'specs.graphicsCard': searchRegex },
-        { 'specs.graphics_card': searchRegex },
-        { 'specs.videoCard': searchRegex },
-        { 'specs.video_card': searchRegex },
-        { 'specs.model': searchRegex },
-      ];
-    }
 
-    if (filters?.minPrice !== undefined || filters?.maxPrice !== undefined) {
-      query.price = {};
-      if (filters.minPrice !== undefined) query.price.$gte = filters.minPrice;
-      if (filters.maxPrice !== undefined) query.price.$lte = filters.maxPrice;
-    }
+    return results;
+  }
 
-    this.addRegexOrFilter(
-      query,
-      [
-        'specs.processor',
-        'specs.cpu',
-        'specs.cpu model',
-        'specs.processor model',
-      ],
-      filters?.processor,
-    );
-    this.addRegexOrFilter(
-      query,
-      ['specs.ssd', 'specs.storage', 'specs.storage capacity'],
-      filters?.ssd,
-    );
-    this.addRegexOrFilter(
-      query,
-      ['specs.ram', 'specs.memory', 'specs.system memory'],
-      filters?.ram,
-    );
-    this.addRegexOrFilter(
-      query,
-      ['gpuType', 'specs.gputype', 'specs.gpu type', 'specs.graphics type'],
-      filters?.gpuType,
-    );
-    this.addRegexOrFilter(
-      query,
-      [
-        'gpuMemory',
-        'specs.gpumemory',
-        'specs.gpu memory',
-        'specs.graphics memory',
-        'specs.vram',
-      ],
-      filters?.gpuMemory,
-    );
-    this.addRegexOrFilter(
-      query,
-      [
-        'displaySize',
-        'specs.display size',
-        'specs.screen size',
-        'specs.display',
-      ],
-      filters?.displaySize,
-    );
-    if (filters?.isTouchScreen !== undefined) {
-      query.isTouchScreen = filters.isTouchScreen;
-    }
-
-    const sort: Record<string, 1 | -1> =
-      filters?.sort === 'price_asc'
-        ? { price: 1 }
-        : filters?.sort === 'price_desc'
-          ? { price: -1 }
-          : filters?.sort === 'newest'
-            ? { createdAt: -1 }
-            : filters?.sort === 'rating'
-              ? { averageRating: -1, createdAt: -1 }
-              : { createdAt: -1 };
-
-    const [products, total] = await Promise.all([
-      this.productModel
-        .find(query)
-        .populate('brandId', 'name code')
-        .populate('categoryId', 'name slug')
-        .skip(skip)
-        .limit(limit)
-        .sort(sort)
-        .exec(),
-      this.productModel.countDocuments(query).exec(),
+  async getFilterOptions() {
+    const [brands, categories, tags] = await Promise.all([
+      this.brandsService.findAll({ isActive: true }),
+      this.categoriesService.findAll(),
+      this.productModel.distinct('tags').exec(),
     ]);
 
-    let enrichedProducts = await this.attachRawMaterialNames(products);
-
-    enrichedProducts = enrichedProducts.map((product) => {
-      if (product.dimensions) {
-        const weightGrams = product.dimensions.weightGrams;
-        if (weightGrams !== undefined && weightGrams !== null) {
-          if (weightGrams < 1) {
-            product.dimensions.weightGrams = Math.round(weightGrams * 1000);
-            product.dimensions.weight = `${product.dimensions.weightGrams} gm`;
-          } else {
-            product.dimensions.weight = `${(weightGrams / 1000).toFixed(2)} kg`;
-          }
-        }
-      }
-      return product;
-    });
-
-    const result: ProductListResult = {
-      products: enrichedProducts,
-      items: enrichedProducts,
-      total,
-      count: total,
-      page,
-      limit,
-    };
-
-    if (cacheable) {
-      await this.cache.set(cacheKey, result);
-    }
-
-    return result;
-  }
-
-  /**
-   * Resolve the manufacturing raw material name(s) used by each product.
-   * Traces via sourceStockId -> SemiFinishedStock -> rawMaterialId -> RawMaterial
-   * and/or lotId -> RawMaterial (raw materials bought under that lot).
-   * Products without stock/lot links get an empty array.
-   */
-  private async attachRawMaterialNames(
-    products: ProductDocument[],
-  ): Promise<Array<ProductDocument & { rawMaterialNames: string[] }>> {
-    const stockIdToName = new Map<string, string>();
-    const lotIdToNames: Record<string, string[]> = {};
-
-    const sourceStockIds = products
-      .map((p) =>
-        p.sourceStockId
-          ? (p.sourceStockId as { toString(): string }).toString()
-          : null,
-      )
-      .filter(Boolean);
-    const lotIds = [
-      ...new Set(
-        products.map((p) => p.lotId).filter((l): l is string => Boolean(l)),
-      ),
-    ];
-
-    if (sourceStockIds.length > 0) {
-      const stocks = await this.stockModel
-        .find({ _id: { $in: sourceStockIds } })
-        .populate('rawMaterialId')
-        .exec();
-      for (const s of stocks) {
-        const rm = s.rawMaterialId as unknown as {
-          materialName?: string;
-        } | null;
-        if (rm?.materialName) {
-          stockIdToName.set(s._id.toString(), rm.materialName);
-        }
-      }
-    }
-
-    if (lotIds.length > 0) {
-      const rawMaterials = await this.rawMaterialModel
-        .find({ lotId: { $in: lotIds } })
-        .exec();
-      for (const rm of rawMaterials) {
-        if (rm.lotId) {
-          (lotIdToNames[rm.lotId] ||= []).push(rm.materialName);
-        }
-      }
-    }
-    for (const lotId of lotIds) {
-      lotIdToNames[lotId] = [...new Set(lotIdToNames[lotId] || [])];
-    }
-
-    return products.map((p) => {
-      const names: string[] = [];
-      if (p.sourceStockId) {
-        const name = stockIdToName.get(
-          (p.sourceStockId as { toString(): string }).toString(),
-        );
-        if (name) names.push(name);
-      }
-      if (p.lotId && lotIdToNames[p.lotId]) {
-        names.push(...lotIdToNames[p.lotId]);
-      }
-      const obj = p.toObject() as ProductDocument & {
-        rawMaterialNames: string[];
-      };
-      obj.rawMaterialNames = [...new Set(names)];
-      return obj;
-    });
-  }
-
-  async getFilterOptions(): Promise<{
-    brands: Array<{ _id: string; name: string; code?: string }>;
-    categories: Array<{ _id: string; name: string; slug?: string }>;
-    processors: string[];
-    ssds: string[];
-    rams: string[];
-    gpuTypes: string[];
-    gpuMemories: string[];
-    displaySizes: string[];
-    priceRange: { min: number; max: number };
-    hasTouchScreen: boolean;
-  }> {
-    const query = { isActive: true, status: 'published' };
-
-    const products = await this.productModel
-      .find(query)
-      .select(
-        'brandId categoryId price specs gpuType gpuMemory displaySize isTouchScreen',
-      )
-      .populate('brandId', 'name code')
-      .populate('categoryId', 'name slug')
-      .lean()
-      .exec();
-
-    const brandMap = new Map<
-      string,
-      { _id: string; name: string; code?: string }
-    >();
-    const categoryMap = new Map<
-      string,
-      { _id: string; name: string; slug?: string }
-    >();
-    const processors = new Set<string>();
-    const ssds = new Set<string>();
-    const rams = new Set<string>();
-    const gpuTypes = new Set<string>();
-    const gpuMemories = new Set<string>();
-    const displaySizes = new Set<string>();
-
-    let minPrice = Number.POSITIVE_INFINITY;
-    let maxPrice = 0;
-    let hasTouchScreen = false;
-
-    for (const product of products) {
-      const brand = product.brandId as any;
-      if (brand?._id && brand?.name) {
-        brandMap.set(String(brand._id), {
-          _id: String(brand._id),
-          name: brand.name,
-          code: brand.code,
-        });
-      }
-
-      const category = product.categoryId as any;
-      if (category?._id && category?.name) {
-        categoryMap.set(String(category._id), {
-          _id: String(category._id),
-          name: category.name,
-          slug: category.slug,
-        });
-      }
-
-      if (typeof product.price === 'number') {
-        minPrice = Math.min(minPrice, product.price);
-        maxPrice = Math.max(maxPrice, product.price);
-      }
-
-      if ((product as any).isTouchScreen) hasTouchScreen = true;
-
-      this.addOption(
-        processors,
-        product,
-        [],
-        ['processor', 'cpu', 'cpu model', 'processor model'],
-      );
-      this.addOption(ssds, product, [], ['ssd', 'storage', 'storage capacity']);
-      this.addOption(rams, product, [], ['ram', 'memory', 'system memory']);
-      this.addOption(
-        gpuTypes,
-        product,
-        ['gpuType'],
-        ['gputype', 'gpu type', 'graphics type'],
-      );
-      this.addOption(
-        gpuMemories,
-        product,
-        ['gpuMemory'],
-        ['gpumemory', 'gpu memory', 'graphics memory', 'vram'],
-      );
-      this.addOption(
-        displaySizes,
-        product,
-        ['displaySize'],
-        ['display size', 'screen size', 'display'],
-      );
-    }
-
-    return {
-      brands: this.sortOptions(
-        new Set([...brandMap.values()].map((brand) => brand.name)),
-      ).map(
-        (name) => [...brandMap.values()].find((brand) => brand.name === name)!,
-      ),
-      categories: this.sortOptions(
-        new Set([...categoryMap.values()].map((category) => category.name)),
-      ).map(
-        (name) =>
-          [...categoryMap.values()].find((category) => category.name === name)!,
-      ),
-      processors: this.sortOptions(processors),
-      ssds: this.sortOptions(ssds),
-      rams: this.sortOptions(rams),
-      gpuTypes: this.sortOptions(gpuTypes),
-      gpuMemories: this.sortOptions(gpuMemories),
-      displaySizes: this.sortOptions(displaySizes),
-      priceRange: {
-        min: Number.isFinite(minPrice) ? minPrice : 0,
-        max: maxPrice,
-      },
-      hasTouchScreen,
-    };
-  }
-
-  /**
-   * Find a single product by ID
-   */
-  async findById(
-    id: string,
-    options?: { includeUnpublished?: boolean },
-  ): Promise<ProductDocument> {
-    const cacheKey = `products:v1:byId:${id}`;
-    const cacheable = !options?.includeUnpublished;
-    if (cacheable) {
-      const cached = await this.cache.get<ProductDocument>(cacheKey);
-      if (cached) return cached;
-    }
-
-    const product = await this.productModel
-      .findById(id)
-      .populate('brandId', 'name code')
-      .populate('categoryId', 'name slug')
-      .exec();
-
-    if (!product) {
-      throw new NotFoundException(`Product with ID ${id} not found`);
-    }
-
-    if (!options?.includeUnpublished && product.status !== 'published') {
-      throw new NotFoundException(`Product with ID ${id} not found`);
-    }
-
-    if (cacheable) {
-      await this.cache.set(cacheKey, product);
-    }
-
-    return product;
-  }
-
-  /**
-   * Update a product
-   */
-  async update(id: string, dto: UpdateProductDto): Promise<ProductDocument> {
-    const updateDto = dto as any; // Type assertion for partial DTO
-
-    // If updating SKU, check for conflicts
-    if (updateDto.sku) {
-      const existing = await this.productModel.findOne({
-        sku: updateDto.sku,
-        _id: { $ne: id },
-      });
-      if (existing) {
-        throw new ConflictException(
-          `Product with SKU ${updateDto.sku} already exists`,
-        );
-      }
-    }
-
-    // If updating brandId, validate it exists
-    if (updateDto.brandId) {
-      await this.brandsService.findById(updateDto.brandId);
-    }
-
-    // If updating categoryId, validate it exists
-    if (updateDto.categoryId) {
-      await this.categoriesService.findById(updateDto.categoryId);
-    }
-
-    // Check publish gate if updating status or sourceStockId
-    if (
-      updateDto.status === 'published' ||
-      (updateDto.sourceStockId && updateDto.status !== 'pending')
-    ) {
-      const sourceStockId =
-        updateDto.sourceStockId ||
-        (await this.productModel.findById(id))?.sourceStockId;
-      if (!sourceStockId) {
-        throw new BadRequestException(
-          'sourceStockId is required to publish a product',
-        );
-      }
-      const stock = await this.semiFinishedStockService.findOne(
-        sourceStockId.toString(),
-      );
-      if (stock.status !== 'completed' && stock.status !== 'ready') {
-        throw new BadRequestException(
-          'Associated stock must be in completed or ready status to publish',
-        );
-      }
-    }
-
-    const updateData: any = { ...dto };
-    if ('specs' in updateDto && updateDto.specs) {
-      const existingProduct = await this.productModel.findById(id);
-      if (existingProduct) {
-        updateData.specs = {
-          ...((existingProduct as any).specs || {}),
-          ...updateDto.specs,
-        };
-      }
-    }
-
-    const product = await this.productModel
-      .findByIdAndUpdate(id, updateData, { new: true })
-      .populate('brandId', 'name code')
-      .populate('categoryId', 'name slug')
-      .exec();
-
-    if (!product) {
-      throw new NotFoundException(`Product with ID ${id} not found`);
-    }
-
-    await this.cache.delByPrefix('products:');
-    return product;
-  }
-
-  private isAllowedImageUrl(raw: string): boolean {
-    try {
-      const u = new URL(raw);
-      if (!['http:', 'https:'].includes(u.protocol)) return false;
-      // Block private / loopback / metadata ranges
-      const host = u.hostname.toLowerCase();
-      if (['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(host))
-        return false;
-      if (
-        host.startsWith('10.') ||
-        host.startsWith('192.168.') ||
-        host.startsWith('172.')
-      ) {
-        // Basic private range check — block 10/8, 192.168/16, 172.16/12
-        if (host.startsWith('10.') || host.startsWith('192.168.')) return false;
-        const second = parseInt(host.split('.')[1] || '0', 10);
-        if (host.startsWith('172.') && second >= 16 && second <= 31)
-          return false;
-      }
-      if (
-        host === '169.254.169.254' ||
-        host.endsWith('.internal') ||
-        host.endsWith('.local')
-      )
-        return false;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Download external images from URLs and store them locally
-   */
-  async downloadExternalImages(
-    productId: string,
-    imageUrls: string[],
-  ): Promise<ProductDocument> {
-    if (
-      !Array.isArray(imageUrls) ||
-      imageUrls.length === 0 ||
-      imageUrls.length > 10
-    ) {
-      throw new BadRequestException('imageUrls must be an array of 1-10 URLs');
-    }
-    for (const u of imageUrls) {
-      if (
-        typeof u !== 'string' ||
-        u.length > 2048 ||
-        !this.isAllowedImageUrl(u)
-      ) {
-        throw new BadRequestException(`Blocked or invalid image URL: ${u}`);
-      }
-    }
-    const product = await this.productModel.findById(productId);
-    if (!product) {
-      throw new NotFoundException(`Product with ID ${productId} not found`);
-    }
-
-    const storagePath = FileStorageUtil.getImageStoragePath();
-    const localPaths: string[] = [];
-
-    for (const imageUrl of imageUrls) {
-      try {
-        const response = await axios.get(imageUrl, {
-          responseType: 'arraybuffer',
-          timeout: 8000,
-          maxContentLength: 5 * 1024 * 1024,
-          maxBodyLength: 5 * 1024 * 1024,
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-          },
-          validateStatus: (s) => s >= 200 && s < 300,
-        });
-
-        const contentType = String(
-          response.headers['content-type'] || 'image/jpeg',
-        );
-        if (!contentType.startsWith('image/')) {
-          this.logger.warn(`URL does not point to an image: ${imageUrl}`);
-          continue;
-        }
-        if (
-          !['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(
-            contentType.split(';')[0].trim().toLowerCase(),
-          )
-        ) {
-          this.logger.warn(`Unsupported image content-type: ${contentType}`);
-          continue;
-        }
-
-        const ext =
-          contentType.split('/').pop()?.split(';')[0]?.trim() || 'jpg';
-        const safeExt = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(
-          ext.toLowerCase(),
-        )
-          ? ext.toLowerCase()
-          : 'jpg';
-        const filename = FileStorageUtil.generateUniqueFilename(
-          `scraped.${safeExt}`,
-        );
-        const filePath = path.join(storagePath, filename);
-
-        fs.writeFileSync(filePath, Buffer.from(response.data));
-        localPaths.push(`/uploads/images/products/${filename}`);
-      } catch (error: any) {
-        this.logger.warn(
-          `Failed to download image: ${imageUrl} - ${error.message}`,
-        );
-      }
-    }
-
-    if (localPaths.length === 0) {
-      throw new BadRequestException(
-        'Failed to download any images from the provided URLs',
-      );
-    }
-
-    product.images.push(...localPaths);
-    if (product.status === 'pending') {
-      product.status = 'published';
-    }
-    await product.save();
-
-    await this.cache.delByPrefix('products:');
-    return product;
-  }
-
-  /**
-   * Upload images for a product
-   */
-  async uploadImages(
-    productId: string,
-    files: Express.Multer.File[],
-  ): Promise<ProductDocument> {
-    const product = await this.productModel.findById(productId);
-    if (!product) {
-      throw new NotFoundException(`Product with ID ${productId} not found`);
-    }
-
-    const storagePath = FileStorageUtil.getImageStoragePath();
-    const imageUrls: string[] = [];
-
-    // Save images and generate URLs
-    for (const file of files) {
-      this.assertAllowedMagicBytes(file.path, ['image']);
-      const filename = FileStorageUtil.generateUniqueFilename(
-        file.originalname,
-      );
-      const filePath = path.join(storagePath, filename);
-
-      fs.renameSync(file.path, filePath);
-
-      // Store relative path for URL
-      imageUrls.push(`/uploads/images/products/${filename}`);
-    }
-
-    // Append to existing images
-    product.images.push(...imageUrls);
-    if (product.status === 'pending') {
-      product.status = 'published';
-    }
-    await product.save();
-
-    await this.cache.delByPrefix('products:');
-    return product;
-  }
-
-  /**
-   * Soft delete a product (set isActive to false)
-   */
-  async delete(id: string): Promise<void> {
-    const product = await this.productModel.findByIdAndDelete(id).exec();
-
-    if (!product) {
-      throw new NotFoundException(`Product with ID ${id} not found`);
-    }
-
-    await this.cache.delByPrefix('products:');
-    this.logger.log(`Product ${id} permanently deleted`);
-  }
-
-  /**
-   * Find all products without pagination (for internal analytics use)
-   */
-  async findAllProducts(): Promise<ProductDocument[]> {
-    return this.productModel.find({ isActive: true }).exec();
+    return { brands, categories, tags };
   }
 }

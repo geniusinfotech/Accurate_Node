@@ -9,6 +9,7 @@ import {
   UnauthorizedException,
   Res,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LogoutService } from './logout.service';
 import { LoginDto } from './dto/login.dto';
@@ -31,6 +32,11 @@ import type {
 } from 'express';
 
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+
+// Stricter than the global limit: these are the brute-force / email-bomb targets.
+const AUTH_THROTTLE = {
+  default: { limit: Number(process.env.AUTH_THROTTLE_LIMIT) || 10, ttl: 60000 },
+};
 
 @Controller('auth')
 export class AuthController {
@@ -96,11 +102,13 @@ export class AuthController {
   }
 
   @Post('register')
+  @Throttle(AUTH_THROTTLE)
   async register(@Body() body: RegisterDto) {
     return this.authService.register(body);
   }
 
   @Post('login')
+  @Throttle(AUTH_THROTTLE)
   async login(@Body() loginDto: LoginDto, @Request() req: ExpressRequest, @Res({ passthrough: true }) res: Response) {
     const user = await this.authService.validateUser(
       loginDto.email,
@@ -187,16 +195,21 @@ export class AuthController {
   async changePassword(
     @Request() req: Request & { user: UserResponse },
     @Body() changePasswordDto: ChangePasswordDto,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    return this.authService.changePassword(
+    const result = await this.authService.changePassword(
       req.user._id,
       changePasswordDto.oldPassword,
       changePasswordDto.newPassword,
     );
+    // Force re-login: drop auth cookies so the browser session ends immediately.
+    this.clearAuthCookie(res, req as any);
+    return result;
   }
 
   // Forgot password
   @Post('forgot-password')
+  @Throttle(AUTH_THROTTLE)
 
   async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
     return this.authService.forgotPassword(forgotPasswordDto.email);
@@ -204,6 +217,7 @@ export class AuthController {
 
   // Reset password
   @Post('reset-password')
+  @Throttle(AUTH_THROTTLE)
   async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
     return this.authService.resetPassword(
       resetPasswordDto.token,

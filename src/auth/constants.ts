@@ -1,17 +1,20 @@
 /* eslint-disable prettier/prettier */
+// Load .env here: this module is imported (and these values read) before
+// ConfigModule.forRoot() runs, so without it a .env-only deploy would silently
+// sign tokens with a fallback secret. No fallbacks — missing secrets must fail boot.
+import 'dotenv/config';
+
+function secret(name: 'JWT_SECRET' | 'JWT_REFRESH_SECRET'): string {
+  const value = process.env[name];
+  if (!value || value.length < 32) {
+    throw new Error(`${name} must be set to at least 32 characters`);
+  }
+  return value;
+}
+
 export const jwtConstants = {
-  secret: process.env.JWT_SECRET || 'glitera-dev-secret-key-2025',
+  secret: secret('JWT_SECRET'),
   expiresIn: process.env.JWT_EXPIRES_IN || '1h',
-  refreshSecret: process.env.JWT_REFRESH_SECRET || 'glitera-dev-refresh-secret-2025',
+  refreshSecret: secret('JWT_REFRESH_SECRET'),
   refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
 };
-
-// Validate JWT_SECRET in production
-if (process.env.NODE_ENV === 'production') {
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
-    throw new Error('JWT_SECRET must be at least 32 characters in production');
-  }
-  if (!process.env.JWT_REFRESH_SECRET || process.env.JWT_REFRESH_SECRET.length < 32) {
-    throw new Error('JWT_REFRESH_SECRET must be at least 32 characters in production');
-  }
-}
