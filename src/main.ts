@@ -24,6 +24,14 @@ async function bootstrap() {
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ limit: '1mb', extended: true }));
 
+  // Transparently route /auth/google and callbacks whether called with or without /api prefix
+  app.use((req: any, res: any, next: any) => {
+    if (req.url && (req.url.startsWith('/auth/google') || req.url === '/auth/google')) {
+      req.url = `/api${req.url}`;
+    }
+    next();
+  });
+
   // Set global prefix so all routes are under /api
   app.setGlobalPrefix('api');
 

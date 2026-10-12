@@ -15,6 +15,7 @@ import {
   getRazorpayInstance,
   toPaise,
 } from '../payment/razorpay-client.util';
+import { getTestOrder } from '../payment/test-orders.store';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
 import { Role } from '../auth/roles.enum';
 import { SettingsService } from '../settings/settings.service';
@@ -64,6 +65,21 @@ export class OrdersService {
     totalAmount: number,
   ): Promise<boolean> {
     if (!razorpayOrderId) return false;
+
+    if (
+      process.env.NODE_ENV !== 'production' &&
+      razorpayOrderId.startsWith('order_test_')
+    ) {
+      const expected = toPaise(totalAmount);
+      const testOrder = getTestOrder(razorpayOrderId);
+      if (testOrder && testOrder.amount !== expected) {
+        this.logger.error(
+          `Payment amount mismatch on ${razorpayOrderId}: test order holds ${testOrder.amount} paise, order comes to ${expected} paise. Recording unpaid.`,
+        );
+        return false;
+      }
+      return true;
+    }
 
     const instance = getRazorpayInstance();
     if (!instance) {
@@ -267,7 +283,7 @@ export class OrdersService {
       orderNumber,
       userId: userId ? new Types.ObjectId(userId) : undefined,
       customerName: createOrderDto.customerName.trim(),
-      phone: createOrderDto.phone.trim(),
+      phone: createOrderDto.phone.trim().replace(/\D/g, ''),
       address: createOrderDto.address.trim(),
       pincode: createOrderDto.pincode.trim(),
       items,

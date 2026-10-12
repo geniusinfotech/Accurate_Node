@@ -33,6 +33,7 @@ import { SettingsModule } from './settings/settings.module';
 import { PaymentModule } from './payment/payment.module';
 import { OrdersModule } from './orders/orders.module';
 import { CustomersModule } from './customers/customers.module';
+import { ContactModule } from './contact/contact.module';
 
 const databaseLogger = new Logger('Database');
 
@@ -115,6 +116,7 @@ const databaseLogger = new Logger('Database');
     PaymentModule,
     OrdersModule,
     CustomersModule,
+    ContactModule,
   ],
   controllers: [AppController],
   providers: [

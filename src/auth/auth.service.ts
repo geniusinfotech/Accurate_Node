@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../users/users.service';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
@@ -15,6 +16,7 @@ import { Role } from './roles.enum';
 import { EmailService } from './email.service';
 import * as crypto from 'crypto';
 import { ActivityService } from '../managers/activity.service';
+import axios from 'axios';
 
 @Injectable()
 export class AuthService {
@@ -23,6 +25,7 @@ export class AuthService {
     private jwtService: JwtService,
     private emailService: EmailService,
     private activityService: ActivityService,
+    private configService: ConfigService,
   ) { }
 
   async validateUser(
@@ -326,5 +329,87 @@ export class AuthService {
     return this.login(userResponse);
   }
 
+  /**
+   * Server-Side Authorization Code Flow:
+   * Exchanges an OAuth authorization code from Google for tokens using client secret,
+   * retrieves verified profile details from Google's UserInfo API,
+   * then finds or creates the user and creates application session tokens.
+   */
+  async exchangeGoogleCodeAndLogin(
+    code: string,
+    redirectUri?: string,
+  ): Promise<{
+    access_token: string;
+    refresh_token: string;
+    userId: string;
+    email: string;
+    roles: Role[];
+    createdAt: Date;
+    updatedAt: Date;
+    username?: string;
+  }> {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const configuredCallback = this.configService.get<string>(
+      'GOOGLE_CALLBACK_URL',
+      'http://localhost:9010/auth/google/callback',
+    );
+
+    if (!clientId || !clientSecret) {
+      throw new BadRequestException('Google OAuth is not configured on the server');
+    }
+
+    const tokenUrl = 'https://oauth2.googleapis.com/token';
+    const params = new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri || configuredCallback,
+      grant_type: 'authorization_code',
+    });
+
+    let tokenRes: any;
+    try {
+      tokenRes = await axios.post(tokenUrl, params.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+    } catch (err: any) {
+      // If error was redirect_uri_mismatch, try fallback 'postmessage' or configuredCallback
+      const targetUri = redirectUri === 'postmessage' ? configuredCallback : 'postmessage';
+      params.set('redirect_uri', targetUri);
+      try {
+        tokenRes = await axios.post(tokenUrl, params.toString(), {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+      } catch (fallbackErr: any) {
+        const errorDesc =
+          err?.response?.data?.error_description ||
+          err?.response?.data?.error ||
+          err.message;
+        throw new BadRequestException(`Google authorization code exchange failed: ${errorDesc}`);
+      }
+    }
+
+    const { access_token } = tokenRes.data;
+
+    // Fetch user profile from Google UserInfo endpoint using access token
+    const userInfoRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+
+    const googleProfile = userInfoRes.data;
+    const user = await this.usersService.findOrCreateGoogleUser({
+      id: googleProfile.sub,
+      emails: [{ value: googleProfile.email }],
+      name: {
+        givenName: googleProfile.given_name,
+        familyName: googleProfile.family_name,
+      },
+      displayName: googleProfile.name,
+      photos: [{ value: googleProfile.picture }],
+    });
+
+    return this.googleLogin(user);
+  }
 
 }

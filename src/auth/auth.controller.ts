@@ -7,6 +7,7 @@ import {
   Request,
   Get,
   UnauthorizedException,
+  BadRequestException,
   Res,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
@@ -225,14 +226,14 @@ export class AuthController {
     );
   }
 
-  // Google OAuth login
+  // Google OAuth login (browser redirect flow)
   @Get('google')
   @UseGuards(GoogleAuthGuard)
   async googleAuth() {
     // Guard redirects to Google
   }
 
-  // Google OAuth callback
+  // Google OAuth callback (browser redirect flow)
   @Get('google/callback') // auth/google/callback
   @UseGuards(GoogleAuthGuard)
   async googleAuthRedirect(
@@ -243,7 +244,7 @@ export class AuthController {
     this.setAuthCookie(res, result.access_token, req as any);
     this.setRefreshCookie(res, result.refresh_token, req as any);
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:9008';
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:9011';
     // Validate FRONTEND_URL to prevent open redirect via env poisoning
     let redirectUrl: string;
     try {
@@ -258,9 +259,27 @@ export class AuthController {
       }
       redirectUrl = parsed.toString();
     } catch {
-      redirectUrl = 'http://localhost:9008/auth/google/callback';
+      redirectUrl = 'http://localhost:9011/auth/google/callback';
     }
     res.redirect(redirectUrl);
+  }
+
+  // Google OAuth direct code exchange (Server-Side Authorization Code Flow via API)
+  @Post('google')
+  @Throttle(AUTH_THROTTLE)
+  async googleCodeLogin(
+    @Body('code') code: string,
+    @Body('redirectUri') redirectUri: string,
+    @Request() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!code) {
+      throw new BadRequestException('Authorization code is required');
+    }
+    const result = await this.authService.exchangeGoogleCodeAndLogin(code, redirectUri);
+    this.setAuthCookie(res, result.access_token, req as any);
+    this.setRefreshCookie(res, result.refresh_token, req as any);
+    return result;
   }
 
 }

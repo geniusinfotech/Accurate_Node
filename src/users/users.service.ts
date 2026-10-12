@@ -122,33 +122,57 @@ export class UsersService {
   }
 
   async findOrCreateGoogleUser(profile: any): Promise<UserDocument> {
-    let user = await this.userModel.findOne({ googleId: profile.id });
+    const googleId = profile.id || profile.sub;
+    let user = await this.userModel.findOne({ googleId });
 
     if (!user) {
       // Check if user exists with same email
-      user = await this.userModel.findOne({ email: profile.emails[0].value });
+      const email = (
+        profile.emails?.[0]?.value ||
+        profile.email ||
+        ''
+      ).toLowerCase().trim();
+
+      if (email) {
+        user = await this.userModel.findOne({ email });
+      }
 
       if (user) {
         // Link Google account to existing user
-        user.googleId = profile.id;
+        user.googleId = googleId;
+        if (user.isActive === false) {
+          user.isActive = true;
+        }
+        if (!user.avatar && (profile.photos?.[0]?.value || profile.picture)) {
+          user.avatar = profile.photos?.[0]?.value || profile.picture;
+        }
         await user.save();
       } else {
-        // Create new user
+        // Create new user with active status
+        const givenName = profile.name?.givenName || profile.given_name || 'Google';
+        const familyName = profile.name?.familyName || profile.family_name || 'User';
+        const displayName =
+          profile.displayName ||
+          profile.name ||
+          (email ? email.split('@')[0] : `user_${Date.now()}`);
+
         const newUser = new this.userModel({
-          googleId: profile.id,
-          email: profile.emails[0].value,
-          firstname: profile.name?.givenName || 'Google',
-          lastname: profile.name?.familyName || 'User',
-          username: profile.displayName || profile.emails[0].value.split('@')[0],
+          googleId,
+          email,
+          firstname: givenName,
+          lastname: familyName,
+          username: displayName,
           roles: [Role.USER],
-          isActive: false,
-          phone: '', // Google doesn't always provide phone, need to handle strict requirement or bypass for google users? User schema says phone required: true. I should probably set a placeholder or make it optional for google users?
-          // But 'phone' is required: true in Schema.
-          // I will set a placeholder or empty string if allowed.
-          address: { street: '', city: '', state: '', zip: '', country: '' }, // Placeholder for required address
+          isActive: true,
+          phone: '',
+          address: { street: '', city: '', state: '', zip: '', country: '' },
+          avatar: profile.photos?.[0]?.value || profile.picture || '',
         });
         user = await newUser.save();
       }
+    } else if (user.isActive === false) {
+      user.isActive = true;
+      await user.save();
     }
 
     return user;
