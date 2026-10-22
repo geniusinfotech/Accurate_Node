@@ -115,5 +115,11 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
+  },
+  "overrides": {
+    "argparse": "^2.0.1",
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   }
 }
