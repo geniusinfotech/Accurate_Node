@@ -21,6 +21,9 @@ export class Category {
   showOnHomepage: boolean;
 
   @Prop()
+  image: string;
+
+  @Prop()
   homepageCoverImage: string;
 }
 

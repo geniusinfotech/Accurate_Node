@@ -36,6 +36,11 @@ export class UsersController {
     if (!raw) return null;
     const plain = (raw as any).toObject ? (raw as any).toObject() : raw;
     const { password, resetPasswordToken, resetPasswordExpires, ...safe } = plain;
+    if (Array.isArray(safe.addresses)) {
+      safe.addresses = safe.addresses.filter(
+        (a: any) => Boolean(a && (a.street || a.line1 || a.city || a.zip || a.pincode))
+      );
+    }
     return safe;
   }
 

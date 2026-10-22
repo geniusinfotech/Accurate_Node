@@ -151,6 +151,25 @@ export class SafetyInfoDto {
   doNotMixWithOtherCleaners?: boolean;
 }
 
+/** Single source of truth for product types (also used by the Excel importer). */
+export const PRODUCT_TYPES: string[] = [
+  'liquid_detergent',
+  'dishwash',
+  'fabric_conditioner',
+  'floor_cleaner',
+  'phenyl',
+  'handwash',
+  'toilet_cleaner',
+  'bathroom_cleaner',
+  'multipurpose_cleaner',
+  'glass_cleaner',
+  'tile_cleaner',
+  'fabric_whitener',
+  'kitchen_cleaner',
+  'car_cleaner',
+  'other',
+];
+
 /**
  * Main Product DTO
  */
@@ -194,23 +213,7 @@ export class CreateProductDto {
   @Transform(({ value }) => {
     if (typeof value !== 'string') return value;
     const clean = value.toLowerCase().trim().replace(/[\s-]+/g, '_');
-    const valid = [
-      'liquid_detergent',
-      'dishwash',
-      'fabric_conditioner',
-      'floor_cleaner',
-      'phenyl',
-      'handwash',
-      'toilet_cleaner',
-      'bathroom_cleaner',
-      'multipurpose_cleaner',
-      'glass_cleaner',
-      'tile_cleaner',
-      'fabric_whitener',
-      'kitchen_cleaner',
-      'car_cleaner',
-      'other',
-    ];
+    const valid = PRODUCT_TYPES;
     if (valid.includes(clean)) return clean;
     if (clean.includes('detergent') || clean.includes('laundry'))
       return 'liquid_detergent';
@@ -229,23 +232,7 @@ export class CreateProductDto {
     if (clean.includes('kitchen')) return 'kitchen_cleaner';
     return clean || 'other';
   })
-  @IsIn([
-    'liquid_detergent',
-    'dishwash',
-    'fabric_conditioner',
-    'floor_cleaner',
-    'phenyl',
-    'handwash',
-    'toilet_cleaner',
-    'bathroom_cleaner',
-    'multipurpose_cleaner',
-    'glass_cleaner',
-    'tile_cleaner',
-    'fabric_whitener',
-    'kitchen_cleaner',
-    'car_cleaner',
-    'other',
-  ])
+  @IsIn(PRODUCT_TYPES)
   productType: string;
 
   @IsString()

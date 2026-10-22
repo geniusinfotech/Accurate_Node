@@ -18,7 +18,9 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "backfill:permissions": "ts-node src/managers/scripts/backfill-permissions.ts"
+    "backfill:permissions": "ts-node src/managers/scripts/backfill-permissions.ts",
+    "create:admin": "ts-node scripts/create-admin.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@nestjs/common": "^11.2.5",

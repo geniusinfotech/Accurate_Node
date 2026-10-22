@@ -33,4 +33,8 @@ export class CreatePaymentOrderDto {
   @IsOptional()
   @IsString()
   currency?: string;
+
+  @IsOptional()
+  @IsString()
+  couponCode?: string;
 }

@@ -1,13 +1,19 @@
 import * as crypto from 'crypto';
-import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, Req } from '@nestjs/common';
 import { verifyRazorpaySignature } from './razorpay-signature.util';
-import { getRazorpayInstance, toPaise } from './razorpay-client.util';
+import {
+  getRazorpayInstance,
+  getRazorpayKeyId,
+  getRazorpayKeySecret,
+  toPaise,
+} from './razorpay-client.util';
 import { registerTestOrder } from './test-orders.store';
 import { OrdersService } from '../orders/orders.service';
 import { CreatePaymentOrderDto } from './dto/create-payment-order.dto';
 import { APISuccess, APIError } from '../common/api-response';
 import { Throttle } from '@nestjs/throttler';
 import { IsNotEmpty, IsString } from 'class-validator';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard';
 
 // Needs validators: the global ValidationPipe is whitelist + forbidNonWhitelisted,
 // so an undecorated class rejects every request with 400.
@@ -46,18 +52,24 @@ export class PaymentController {
    * that same calculation is what the recorded order is checked against.
    */
   @Post('create-order')
+  @UseGuards(OptionalJwtAuthGuard)
   @Throttle({ default: { limit: 20, ttl: 60000 } })
-  async createOrder(@Body() body: CreatePaymentOrderDto) {
+  async createOrder(@Body() body: CreatePaymentOrderDto, @Req() req: any) {
     const currency = body.currency || 'INR';
     if (!/^[A-Z]{3}$/.test(currency)) {
       throw APIError.badRequest('Invalid currency');
     }
 
+    const userId =
+      req?.user?.userId || req?.user?.sub || req?.user?.id || req?.user?._id;
+
     const quote = await this.ordersService.quoteCart(
       body.items as any,
       body.pincode.trim(),
+      body.couponCode?.trim(),
+      userId,
     );
-    if (!Number.isFinite(quote.totalAmount) || quote.totalAmount <= 0) {
+    if (!Number.isFinite(quote.totalAmount) || quote.totalAmount < 0) {
       throw APIError.badRequest('Invalid amount');
     }
     if (quote.totalAmount > 1000000) {
@@ -81,13 +93,15 @@ export class PaymentController {
       });
       return {
         ...order,
-        key: process.env.RAZORPAY_KEY_ID,
+        key: getRazorpayKeyId(),
         // Echoed back so the checkout screen shows the figure being charged.
         quote: {
           subtotal: quote.subtotal,
           shippingCost: quote.shippingCost,
           discount: quote.discount,
           totalAmount: quote.totalAmount,
+          couponDiscount: quote.couponDiscount,
+          couponCode: quote.couponCode,
         },
       };
     } catch (err: any) {
@@ -110,7 +124,14 @@ export class PaymentController {
   }
 
   private createDevTestOrder(
-    quote: { subtotal: number; shippingCost: number; discount: number; totalAmount: number },
+    quote: {
+      subtotal: number;
+      shippingCost: number;
+      discount: number;
+      totalAmount: number;
+      couponDiscount?: number;
+      couponCode?: string;
+    },
     currency: string,
   ) {
     const testOrderId = `order_test_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -128,12 +149,14 @@ export class PaymentController {
       attempts: 0,
       notes: [],
       created_at: Math.floor(Date.now() / 1000),
-      key: process.env.RAZORPAY_KEY_ID || 'rzp_test_accurate_dev',
+      key: getRazorpayKeyId() || 'rzp_test_accurate_dev',
       quote: {
         subtotal: quote.subtotal,
         shippingCost: quote.shippingCost,
         discount: quote.discount,
         totalAmount: quote.totalAmount,
+        couponDiscount: quote.couponDiscount,
+        couponCode: quote.couponCode,
       },
       isSandbox: true,
     };
@@ -147,8 +170,7 @@ export class PaymentController {
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       throw APIError.badRequest('Missing payment verification fields');
     }
-    const secret =
-      process.env.RAZORPAY_KEY_SECRET || process.env.RAZORPAY_SECRET || '';
+    const secret = getRazorpayKeySecret();
     if (!secret && process.env.NODE_ENV === 'production') {
       throw APIError.internalServerError('Payment gateway not configured');
     }
@@ -181,8 +203,7 @@ export class PaymentController {
       throw APIError.badRequest('Only test orders can be signed with dev-sign-test');
     }
     const secret =
-      process.env.RAZORPAY_KEY_SECRET ||
-      process.env.RAZORPAY_SECRET ||
+      getRazorpayKeySecret() ||
       'test_secret_for_signature_checks';
     const hmac = crypto.createHmac('sha256', secret);
     hmac.update(`${razorpay_order_id}|${razorpay_payment_id}`);

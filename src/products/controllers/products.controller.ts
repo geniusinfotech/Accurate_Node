@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Delete,
   Param,
   Body,
@@ -14,7 +15,9 @@ import {
   BadRequestException,
   Request,
   Logger,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   FileInterceptor,
   FilesInterceptor,
@@ -382,19 +385,31 @@ export class ProductsController {
   async uploadExcel(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: ExcelUploadDto,
-    @Request() req,
   ) {
     if (!file) {
       throw new BadRequestException('Excel file is required');
     }
 
-    const userId = req.user.userId || req.user.sub;
     return this.productsService.bulkUploadFromExcel(
       file,
       dto.brandId,
       dto.categoryId,
-      userId,
     );
+  }
+
+  /** Blank spreadsheet for bulk import (Admin only). Declared before ':id' routes. */
+  @Get('import-template')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @Permissions(Permission.PRODUCTS_ADD)
+  async importTemplate(@Res() res: Response) {
+    const file = await this.productsService.buildImportTemplate();
+    res.set({
+      'Content-Type':
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': 'attachment; filename="product-import-template.xlsx"',
+    });
+    res.send(file);
   }
 
   /**
@@ -462,6 +477,14 @@ export class ProductsController {
   @Roles(Role.ADMIN, Role.MANAGER)
   @Permissions(Permission.PRODUCTS_EDIT)
   async update(@Param('id') id: string, @Body() dto: UpdateProductDto) {
+    return this.productsService.update(id, dto);
+  }
+
+  @Patch(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @Permissions(Permission.PRODUCTS_EDIT)
+  async updatePatch(@Param('id') id: string, @Body() dto: UpdateProductDto) {
     return this.productsService.update(id, dto);
   }
 

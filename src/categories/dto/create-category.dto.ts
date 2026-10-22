@@ -1,6 +1,7 @@
 /* eslint-disable prettier/prettier */
 
-import { IsNotEmpty, IsString, IsBoolean, IsOptional, IsArray } from 'class-validator';
+import { IsNotEmpty, IsString, IsBoolean, IsOptional } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class CreateCategoryDto {
     @IsNotEmpty()
@@ -15,19 +16,22 @@ export class CreateCategoryDto {
     @IsString()
     description?: string;
 
-
-
     @IsOptional()
+    @Transform(({ value }) => value === 'true' || value === true || value === 1 || value === '1')
     @IsBoolean()
     isActive?: boolean;
 
     @IsOptional()
+    @Transform(({ value }) => value === 'true' || value === true || value === 1 || value === '1')
     @IsBoolean()
     showOnHomepage?: boolean;
 
     @IsOptional()
     @IsString()
-    homepageCoverImage?: string;
+    image?: string;
 
+    @IsOptional()
+    @IsString()
+    homepageCoverImage?: string;
 }
 

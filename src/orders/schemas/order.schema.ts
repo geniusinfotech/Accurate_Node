@@ -95,6 +95,12 @@ export class Order {
 
   @Prop({ default: '' })
   notes: string;
+
+  @Prop({ default: '', trim: true })
+  couponCode?: string;
+
+  @Prop({ default: 0, min: 0 })
+  couponDiscount?: number;
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);

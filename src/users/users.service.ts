@@ -196,7 +196,7 @@ export class UsersService {
       }
     }
     // Validate allowlist
-    const allowedKeys = ['street', 'city', 'state', 'zip', 'country', 'isDefault', 'label', 'phone'];
+    const allowedKeys = ['street', 'line1', 'line2', 'city', 'state', 'zip', 'pincode', 'country', 'isDefault', 'label', 'phone'];
     const clean: any = {};
     for (const k of allowedKeys) {
       if (addressData[k] !== undefined) {
@@ -204,8 +204,20 @@ export class UsersService {
         else if (typeof addressData[k] === 'boolean') clean[k] = addressData[k];
       }
     }
-    if (!clean.street || !clean.city) throw new BadRequestException('Street and city are required');
-    if (clean.zip && !/^[0-9A-Za-z\s-]{3,12}$/.test(clean.zip)) throw new BadRequestException('Invalid zip');
+    const streetVal = clean.street || clean.line1;
+    const cityVal = clean.city;
+    if (!streetVal || !cityVal) throw new BadRequestException('Street and city are required');
+    const zipVal = clean.zip || clean.pincode;
+    if (zipVal && !/^[0-9A-Za-z\s-]{3,12}$/.test(zipVal)) throw new BadRequestException('Invalid zip');
+
+    // Ensure both alias names are saved so frontend always gets full address
+    clean.street = streetVal;
+    clean.line1 = streetVal;
+    if (zipVal) {
+      clean.zip = zipVal;
+      clean.pincode = zipVal;
+    }
+
     if (clean.isDefault || user.addresses.length === 0) {
       user.addresses.forEach((a) => (a.isDefault = false));
       clean.isDefault = true;

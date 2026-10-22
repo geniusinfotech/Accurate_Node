@@ -34,11 +34,13 @@ export class CategoriesService {
 
         const fs = require('fs');
         fs.writeFileSync(destPath, file.buffer);
-        return filename;
+        return `/uploads/images/categories/${filename}`;
     }
 
-    removeImage(filename: string): void {
+    removeImage(imagePath: string): void {
         try {
+            if (!imagePath) return;
+            const filename = imagePath.split('/').pop() || imagePath;
             const filePath = join(this.uploadDir, filename);
             if (existsSync(filePath)) {
                 unlinkSync(filePath);
@@ -46,8 +48,17 @@ export class CategoriesService {
         } catch {}
     }
 
-    async create(createCategoryDto: CreateCategoryDto): Promise<Category> {
-        const createdCategory = new this.categoryModel(createCategoryDto);
+    async create(createCategoryDto: any, newImageFilename?: string): Promise<Category> {
+        const data = { ...createCategoryDto };
+        if (newImageFilename) {
+            data.image = newImageFilename;
+            data.homepageCoverImage = newImageFilename;
+        } else if (data.image && !data.homepageCoverImage) {
+            data.homepageCoverImage = data.image;
+        } else if (data.homepageCoverImage && !data.image) {
+            data.image = data.homepageCoverImage;
+        }
+        const createdCategory = new this.categoryModel(data);
         await createdCategory.save();
         await this.cache.delByPrefix('categories:');
         return createdCategory;
@@ -97,7 +108,26 @@ export class CategoriesService {
             if (existing.homepageCoverImage) {
                 this.removeImage(existing.homepageCoverImage);
             }
+            if (existing.image && existing.image !== existing.homepageCoverImage) {
+                this.removeImage(existing.image);
+            }
             updateData.homepageCoverImage = newImageFilename;
+            updateData.image = newImageFilename;
+        } else if (updateData.removeImage === true || updateData.removeImage === 'true') {
+            if (existing.homepageCoverImage) {
+                this.removeImage(existing.homepageCoverImage);
+            }
+            if (existing.image && existing.image !== existing.homepageCoverImage) {
+                this.removeImage(existing.image);
+            }
+            updateData.homepageCoverImage = '';
+            updateData.image = '';
+        } else {
+            if (updateData.image && !updateData.homepageCoverImage) {
+                updateData.homepageCoverImage = updateData.image;
+            } else if (updateData.homepageCoverImage && !updateData.image) {
+                updateData.image = updateData.homepageCoverImage;
+            }
         }
 
         const updatedCategory = await this.categoryModel
@@ -110,6 +140,16 @@ export class CategoriesService {
     }
 
     async remove(id: string): Promise<Category> {
+        const existing = await this.categoryModel.findById(id);
+        if (!existing) {
+            throw new NotFoundException(`Category with ID ${id} not found`);
+        }
+        if (existing.homepageCoverImage) {
+            this.removeImage(existing.homepageCoverImage);
+        }
+        if (existing.image && existing.image !== existing.homepageCoverImage) {
+            this.removeImage(existing.image);
+        }
         const deletedCategory = await this.categoryModel.findByIdAndDelete(id);
         if (!deletedCategory) {
             throw new NotFoundException(`Category with ID ${id} not found`);

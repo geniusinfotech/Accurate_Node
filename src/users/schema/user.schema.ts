@@ -25,6 +25,7 @@ export interface UserResponse {
   updatedAt: Date;
 }
 
+@Schema()
 export class Address {
   @Prop()
   label?: string;
@@ -36,6 +37,9 @@ export class Address {
   line2?: string;
 
   @Prop()
+  street?: string;
+
+  @Prop()
   city?: string;
 
   @Prop()
@@ -43,6 +47,15 @@ export class Address {
 
   @Prop()
   pincode?: string;
+
+  @Prop()
+  zip?: string;
+
+  @Prop()
+  phone?: string;
+
+  @Prop()
+  country?: string;
 
   @Prop({ default: false })
   isDefault?: boolean;

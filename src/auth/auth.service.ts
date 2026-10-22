@@ -200,7 +200,7 @@ export class AuthService {
       password: hash,
       phone: createUserDto.phone?.trim(),
       address: createUserDto.address,
-      roles: createUserDto.roles && createUserDto.roles.length > 0 ? createUserDto.roles : [Role.USER],
+      roles: [Role.USER],
     };
 
     // @ts-ignore

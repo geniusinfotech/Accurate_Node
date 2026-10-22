@@ -1,7 +1,5 @@
-/* eslint-disable prettier/prettier */
-import { IsString, IsEmail, IsOptional, MinLength, IsNotEmpty, ValidateNested, Matches, IsArray } from 'class-validator';
+import { IsString, IsEmail, IsOptional, MinLength, IsNotEmpty, ValidateNested, Matches } from 'class-validator';
 import { Type } from 'class-transformer';
-import { Role } from '../roles.enum';
 
 export class AddressDto {
   @IsString()
@@ -59,8 +57,4 @@ export class RegisterDto {
   @IsString()
   @MinLength(6)
   password: string;
-
-  @IsArray()
-  @IsOptional()
-  roles?: Role[];
 }

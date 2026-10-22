@@ -12,9 +12,9 @@ import {
 } from 'class-validator';
 
 export class CreateOrderItemDto {
-  @IsOptional()
   @IsString()
-  productId?: string;
+  @IsNotEmpty()
+  productId: string;
 
   @IsString()
   @IsNotEmpty()
@@ -105,4 +105,8 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @IsOptional()
+  @IsString()
+  couponCode?: string;
 }

@@ -13,7 +13,9 @@ import * as path from 'path';
 import { extname } from 'path';
 import axios from 'axios';
 import { Product, ProductDocument } from '../schemas/product.schema';
-import { CreateProductDto } from '../dto/create-product.dto';
+import { CreateProductDto, PRODUCT_TYPES } from '../dto/create-product.dto';
+
+const MAX_IMPORT_ROWS = 500;
 import { UpdateProductDto } from '../dto/update-product.dto';
 import { BrandsService } from './brands.service';
 import { CategoriesService } from '../../categories/categories.service';
@@ -309,21 +311,54 @@ export class ProductsService {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
 
-    for (const url of imageUrls) {
+    for (const rawUrl of imageUrls) {
       try {
-        const response = await axios.get(url, { responseType: 'arraybuffer' });
+        if (typeof rawUrl !== 'string' || !rawUrl.trim()) continue;
+        const parsed = new URL(rawUrl.trim());
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          this.logger.warn(`Rejected invalid protocol in image URL: ${rawUrl}`);
+          continue;
+        }
+
+        const host = parsed.hostname.toLowerCase();
+        // Prevent SSRF: block local loopback, link-local, and private RFC-1918 addresses
+        if (
+          host === 'localhost' ||
+          host === '127.0.0.1' ||
+          host === '::1' ||
+          host === '0.0.0.0' ||
+          host === '169.254.169.254' ||
+          host.startsWith('10.') ||
+          host.startsWith('192.168.') ||
+          /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)
+        ) {
+          this.logger.warn(`Blocked attempt to fetch internal/private host: ${host}`);
+          continue;
+        }
+
+        const response = await axios.get(parsed.toString(), {
+          responseType: 'arraybuffer',
+          timeout: 10000,
+          maxContentLength: 10 * 1024 * 1024,
+        });
+
         const contentType = Array.isArray(response.headers['content-type'])
           ? response.headers['content-type'][0]
           : response.headers['content-type'];
-        const contentTypeStr = typeof contentType === 'string' ? contentType : '';
+        const contentTypeStr = typeof contentType === 'string' ? contentType.toLowerCase() : '';
+        if (!contentTypeStr.startsWith('image/')) {
+          this.logger.warn(`Rejected non-image payload from ${rawUrl} (content-type: ${contentTypeStr})`);
+          continue;
+        }
+
         const ext = contentTypeStr.includes('png') ? '.png' : contentTypeStr.includes('webp') ? '.webp' : '.jpg';
         const filename = `product-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
         const destPath = path.join(uploadDir, filename);
         const buffer = Buffer.from(response.data);
         fs.writeFileSync(destPath, buffer);
         downloadedUrls.push(`/uploads/images/products/${filename}`);
-      } catch (error) {
-        this.logger.error(`Failed to download image from ${url}: ${error.message}`);
+      } catch (error: any) {
+        this.logger.error(`Failed to download image from ${rawUrl}: ${error?.message || error}`);
       }
     }
 
@@ -336,38 +371,60 @@ export class ProductsService {
     return product;
   }
 
+  /**
+   * Imports products from an .xlsx sheet (see buildImportTemplate). Columns are
+   * found by header name, so their order does not matter. Rows whose SKU already
+   * exists update that product's name, price, stock (and MRP / description when
+   * filled in); every other row creates a published product.
+   */
   async bulkUploadFromExcel(
     file: Express.Multer.File,
-    brandId: string,
+    brandId: string | undefined,
     categoryId: string,
-    userId: string,
-  ): Promise<any> {
+  ): Promise<{ created: number; updated: number; errors: string[] }> {
+    await this.categoriesService.findById(categoryId);
+    if (brandId) await this.brandsService.findById(brandId);
+
     const workbook = new ExcelJS.Workbook();
-    const buffer = Buffer.isBuffer(file.buffer) 
-      ? file.buffer 
-      : Buffer.from(file.buffer as unknown as ArrayBuffer);
-    await workbook.xlsx.load(buffer as any);
+    const buffer = file.buffer ?? (await fs.promises.readFile(file.path));
+    try {
+      await workbook.xlsx.load(buffer as any);
+    } catch {
+      throw new BadRequestException('Could not read the file. Use the .xlsx template.');
+    }
+    const sheet = workbook.worksheets[0];
+    if (!sheet) throw new BadRequestException('The workbook has no sheets.');
+    if (sheet.rowCount > MAX_IMPORT_ROWS + 1) {
+      throw new BadRequestException(`Too many rows. Import at most ${MAX_IMPORT_ROWS} at a time.`);
+    }
 
-    const worksheet = workbook.worksheets[0];
-    const results = { created: 0, updated: 0, errors: [] as string[] };
-    const rows: any[] = [];
-
-    worksheet.eachRow((row, rowNumber) => {
-      if (rowNumber === 1) return;
-      rows.push({ row, rowNumber });
+    const text = (cell: ExcelJS.Cell) => (cell?.text ?? '').toString().trim();
+    const column: Record<string, number> = {};
+    sheet.getRow(1).eachCell((cell, n) => {
+      column[text(cell).toLowerCase().replace(/[^a-z]/g, '')] = n;
     });
+    if (!column.name || !column.price) {
+      throw new BadRequestException('The sheet needs "Name" and "Price" columns. Download the template.');
+    }
 
-    for (const { row, rowNumber } of rows) {
-      const name = row.getCell(1)?.value?.toString()?.trim();
-      const sku = row.getCell(2)?.value?.toString()?.trim();
-      const price = parseFloat(row.getCell(3)?.value?.toString() || '0');
-      const stock = parseInt(row.getCell(4)?.value?.toString() || '0', 10);
-      const description = row.getCell(5)?.value?.toString()?.trim() || '';
+    const results = { created: 0, updated: 0, errors: [] as string[] };
+    for (let r = 2; r <= sheet.rowCount; r++) {
+      const row = sheet.getRow(r);
+      const get = (key: string) => (column[key] ? text(row.getCell(column[key])) : '');
+      const number = (key: string) => Number(get(key).replace(/[₹,\s]/g, ''));
 
-      if (!name || !sku || price <= 0) {
-        results.errors.push(`Row ${rowNumber}: Invalid data`);
+      const name = get('name');
+      if (!name && !get('price')) continue; // blank line
+      const price = number('price');
+      const stock = get('stock') ? number('stock') : 0;
+      const mrp = get('mrp') ? number('mrp') : undefined;
+      if (!name || !(price >= 0) || get('price') === '' || !Number.isInteger(stock) || stock < 0) {
+        results.errors.push(`Row ${r}: needs a name, a price and a whole-number stock (0 or more)`);
         continue;
       }
+      const sku = (get('sku') || `${name.replace(/[^A-Za-z0-9]+/g, '-').slice(0, 20)}-${r}-${Date.now().toString(36).slice(-4)}`).toUpperCase();
+      const description = get('description');
+      const type = get('producttype').toLowerCase().replace(/[\s-]+/g, '_');
 
       try {
         const existing = await this.productModel.findOne({ sku }).exec();
@@ -375,7 +432,8 @@ export class ProductsService {
           existing.name = name;
           existing.price = price;
           existing.stock = stock;
-          existing.description = description;
+          if (mrp !== undefined) existing.mrp = mrp;
+          if (description) existing.description = description;
           await existing.save();
           results.updated++;
         } else {
@@ -383,21 +441,58 @@ export class ProductsService {
             name,
             sku,
             price,
+            mrp,
             stock,
             description,
-            brandId,
             categoryId,
-            status: 'pending',
+            ...(brandId ? { brandId } : {}),
+            productType: PRODUCT_TYPES.includes(type) ? type : 'other',
+            status: 'published',
             isActive: true,
           });
           results.created++;
         }
       } catch (error) {
-        results.errors.push(`Row ${rowNumber}: ${error.message}`);
+        results.errors.push(`Row ${r}: ${error.message}`);
       }
     }
-
+    if (file.path) await fs.promises.unlink(file.path).catch(() => undefined);
     return results;
+  }
+
+  /** The sheet admins fill in for bulk import. */
+  async buildImportTemplate(): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Products');
+    sheet.columns = [
+      { header: 'Name', key: 'name', width: 38 },
+      { header: 'SKU', key: 'sku', width: 18 },
+      { header: 'Price', key: 'price', width: 10 },
+      { header: 'MRP', key: 'mrp', width: 10 },
+      { header: 'Stock', key: 'stock', width: 10 },
+      { header: 'Description', key: 'description', width: 50 },
+      { header: 'Product type', key: 'producttype', width: 22 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    sheet.addRow({
+      name: 'Accurate Dishwash Gel 500 ml',
+      sku: 'ACC-DW-500',
+      price: 99,
+      mrp: 120,
+      stock: 100,
+      description: 'Cuts grease fast, gentle on hands.',
+      producttype: 'dishwash',
+    });
+    const help = workbook.addWorksheet('How to fill');
+    [
+      ['Required: Name, Price. Everything else is optional.'],
+      ['SKU: leave empty to generate one. An existing SKU updates that product instead of creating a new one.'],
+      ['Stock: whole number, empty means 0. MRP: the crossed-out price, optional.'],
+      ['Imported products are published straight away. Add photos afterwards by editing each product.'],
+      ['Product type must be one of: ' + PRODUCT_TYPES.join(', ') + ' (anything else becomes "other").'],
+    ].forEach((line) => help.addRow(line));
+    help.getColumn(1).width = 120;
+    return Buffer.from(await workbook.xlsx.writeBuffer());
   }
 
   async getFilterOptions() {
