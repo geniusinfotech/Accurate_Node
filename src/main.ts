@@ -37,10 +37,11 @@ async function bootstrap() {
   // Set global prefix so all routes are under /api
   app.setGlobalPrefix('api');
 
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:9008';
+  const stripSlash = (u: string) => u.trim().replace(/\/+$/, '');
+  const frontendUrl = stripSlash(process.env.FRONTEND_URL || 'http://localhost:9008');
   const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
-    .map(o => o.trim())
+    .map(stripSlash)
     .filter(Boolean);
 
   /* ---------------- Security ---------------- */
