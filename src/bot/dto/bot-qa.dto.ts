@@ -4,6 +4,7 @@ import {
   IsArray,
   IsOptional,
   IsBoolean,
+  MaxLength,
 } from 'class-validator';
 
 export class CreateBotQaDto {
@@ -26,3 +27,11 @@ export class CreateBotQaDto {
 }
 
 export class UpdateBotQaDto extends CreateBotQaDto {}
+
+/** Public chat input: a bounded string, so it can't crash the handler or bloat the lookup. */
+export class BotChatDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(500)
+  message: string;
+}

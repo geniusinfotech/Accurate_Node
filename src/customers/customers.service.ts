@@ -16,8 +16,8 @@ export class CustomersService {
   ) {}
 
   async findOrCreate(name: string, phone: string): Promise<CustomerDocument> {
-    const cleanPhone = phone.trim().replace(/\s+/g, '');
-    const cleanName = name.trim();
+    const cleanPhone = (phone ?? '').trim().replace(/\s+/g, '');
+    const cleanName = (name ?? '').trim();
 
     if (!cleanName || !cleanPhone) {
       throw new BadRequestException('Customer name and phone are required');

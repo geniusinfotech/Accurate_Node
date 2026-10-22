@@ -28,9 +28,6 @@ export function getRazorpayKeySecret(): string {
  * account — an order must be checked against the gateway that charged it.
  */
 export function getRazorpayInstance(): Razorpay | null {
-  if (process.env.RAZORPAY_FORCE_DEMO === 'true') {
-    return null;
-  }
   const key_id = getRazorpayKeyId();
   const key_secret = getRazorpayKeySecret();
   if (!key_id || !key_secret || !key_id.startsWith('rzp_')) {

@@ -107,3 +107,9 @@ export const OrderSchema = SchemaFactory.createForClass(Order);
 
 OrderSchema.index({ createdAt: -1 });
 OrderSchema.index({ orderStatus: 1 });
+
+// A payment can back only one paid order (also closes the race the service-level check can't).
+OrderSchema.index(
+  { paymentId: 1 },
+  { unique: true, partialFilterExpression: { paymentStatus: 'paid' } },
+);

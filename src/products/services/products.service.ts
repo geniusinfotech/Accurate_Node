@@ -16,9 +16,13 @@ import { Product, ProductDocument } from '../schemas/product.schema';
 import { CreateProductDto, PRODUCT_TYPES } from '../dto/create-product.dto';
 
 const MAX_IMPORT_ROWS = 500;
+
+/** User text in a $regex must match literally (no regex injection / ReDoS). */
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 import { UpdateProductDto } from '../dto/update-product.dto';
 import { BrandsService } from './brands.service';
 import { CategoriesService } from '../../categories/categories.service';
+import { assertFetchableUrl, untrustedFetchOptions } from '../../common/utils/safe-http.util';
 import { FileStorageUtil } from '../utils/file-storage.util';
 import { RedisCacheService } from '../../common/cache/cache.service';
 
@@ -157,8 +161,8 @@ export class ProductsService {
 
     if (search) {
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { sku: { $regex: search, $options: 'i' } },
+        { name: { $regex: escapeRegex(search), $options: 'i' } },
+        { sku: { $regex: escapeRegex(search), $options: 'i' } },
       ];
     }
 
@@ -314,32 +318,13 @@ export class ProductsService {
     for (const rawUrl of imageUrls) {
       try {
         if (typeof rawUrl !== 'string' || !rawUrl.trim()) continue;
-        const parsed = new URL(rawUrl.trim());
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-          this.logger.warn(`Rejected invalid protocol in image URL: ${rawUrl}`);
-          continue;
-        }
-
-        const host = parsed.hostname.toLowerCase();
-        // Prevent SSRF: block local loopback, link-local, and private RFC-1918 addresses
-        if (
-          host === 'localhost' ||
-          host === '127.0.0.1' ||
-          host === '::1' ||
-          host === '0.0.0.0' ||
-          host === '169.254.169.254' ||
-          host.startsWith('10.') ||
-          host.startsWith('192.168.') ||
-          /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)
-        ) {
-          this.logger.warn(`Blocked attempt to fetch internal/private host: ${host}`);
-          continue;
-        }
+        const parsed = assertFetchableUrl(rawUrl.trim()); // http(s) only, no internal hosts (SSRF)
 
         const response = await axios.get(parsed.toString(), {
           responseType: 'arraybuffer',
           timeout: 10000,
           maxContentLength: 10 * 1024 * 1024,
+          ...untrustedFetchOptions(), // re-checks the resolved IP on connect; no redirects
         });
 
         const contentType = Array.isArray(response.headers['content-type'])
