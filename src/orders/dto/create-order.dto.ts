@@ -6,14 +6,15 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Min,
   ValidateNested,
 } from 'class-validator';
 
 export class CreateOrderItemDto {
-  @IsOptional()
   @IsString()
-  productId?: string;
+  @IsNotEmpty()
+  productId: string;
 
   @IsString()
   @IsNotEmpty()
@@ -43,6 +44,9 @@ export class CreateOrderDto {
 
   @IsString()
   @IsNotEmpty()
+  @Matches(/^[6-9]\d{9}$/, {
+    message: 'Phone number must start with 6, 7, 8, or 9 and be exactly 10 digits',
+  })
   phone: string;
 
   @IsString()
@@ -101,4 +105,8 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @IsOptional()
+  @IsString()
+  couponCode?: string;
 }

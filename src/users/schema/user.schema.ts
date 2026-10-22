@@ -25,6 +25,7 @@ export interface UserResponse {
   updatedAt: Date;
 }
 
+@Schema()
 export class Address {
   @Prop()
   label?: string;
@@ -36,6 +37,9 @@ export class Address {
   line2?: string;
 
   @Prop()
+  street?: string;
+
+  @Prop()
   city?: string;
 
   @Prop()
@@ -43,6 +47,15 @@ export class Address {
 
   @Prop()
   pincode?: string;
+
+  @Prop()
+  zip?: string;
+
+  @Prop()
+  phone?: string;
+
+  @Prop()
+  country?: string;
 
   @Prop({ default: false })
   isDefault?: boolean;
@@ -108,3 +121,14 @@ export class User {
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
+
+// Secrets never leave the server in any API response, whichever endpoint returns the document.
+UserSchema.set('toJSON', {
+  transform: (_doc, ret: any) => {
+    delete ret.password;
+    delete ret.refreshTokenHash;
+    delete ret.resetPasswordToken;
+    delete ret.resetPasswordExpires;
+    return ret;
+  },
+});

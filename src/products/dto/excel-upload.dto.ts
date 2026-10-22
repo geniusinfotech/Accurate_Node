@@ -1,9 +1,9 @@
-import { IsMongoId, IsNotEmpty } from 'class-validator';
+import { IsMongoId, IsNotEmpty, IsOptional } from 'class-validator';
 
 export class ExcelUploadDto {
+  @IsOptional()
   @IsMongoId()
-  @IsNotEmpty()
-  brandId: string;
+  brandId?: string;
 
   @IsMongoId()
   @IsNotEmpty()

@@ -9,15 +9,18 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Order, OrderDocument } from './schemas/order.schema';
 import { Product, ProductDocument } from '../products/schemas/product.schema';
+import { User, UserDocument } from '../users/schema/user.schema';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { verifyRazorpaySignature } from '../payment/razorpay-signature.util';
 import {
   getRazorpayInstance,
   toPaise,
 } from '../payment/razorpay-client.util';
+import { getTestOrder } from '../payment/test-orders.store';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
 import { Role } from '../auth/roles.enum';
 import { SettingsService } from '../settings/settings.service';
+import { CouponsService } from '../coupons/coupons.service';
 
 @Injectable()
 export class OrdersService {
@@ -26,24 +29,33 @@ export class OrdersService {
   constructor(
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(Product.name) private productModel: Model<ProductDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
     private readonly settingsService: SettingsService,
+    private readonly couponsService: CouponsService,
   ) {}
 
   /**
-   * The shipping rules the Shipping Charges screen maintains: a `default`
-   * charge with per-pincode overrides on top. The checkout page quotes the
-   * customer from this same setting, so pricing an order any other way bills
-   * them one amount and records another.
+   * The shipping rules the Shipping Charges screen maintains:
+   *   - `pincodes` overrides: any key matching the pincode wins (₹0 allowed),
+   *   - `freeShippingAbove`: orders of at least this subtotal ship free (0 = off),
+   *   - `flatRate` (or legacy `default`): the standard charge.
+   * The checkout page quotes the customer from this same setting, so pricing an
+   * order any other way bills them one amount and records another.
    */
-  private async resolveShippingCost(pincode: string): Promise<number> {
+  private async resolveShippingCost(pincode: string, subtotal: number): Promise<number> {
     const FALLBACK = 100; // matches the checkout page when no setting exists
+    const valid = (n: unknown) => Number.isFinite(Number(n)) && Number(n) >= 0;
     try {
       const rules = await this.settingsService.getSetting('shipping');
       if (!rules || typeof rules !== 'object') return FALLBACK;
-      const override = rules[pincode];
-      const cost = override !== undefined ? override : rules.default;
-      const parsed = Number(cost);
-      return Number.isFinite(parsed) && parsed >= 0 ? parsed : FALLBACK;
+      if (rules[pincode] !== undefined) {
+        return valid(rules[pincode]) ? Number(rules[pincode]) : FALLBACK;
+      }
+      if (Number(rules.freeShippingAbove) > 0 && subtotal >= Number(rules.freeShippingAbove)) {
+        return 0;
+      }
+      const flat = rules.flatRate ?? rules.default;
+      return valid(flat) ? Number(flat) : FALLBACK;
     } catch (err) {
       this.logger.warn(
         `Falling back to default shipping: ${err?.message || err}`,
@@ -64,6 +76,21 @@ export class OrdersService {
     totalAmount: number,
   ): Promise<boolean> {
     if (!razorpayOrderId) return false;
+
+    if (
+      process.env.NODE_ENV !== 'production' &&
+      razorpayOrderId.startsWith('order_test_')
+    ) {
+      const expected = toPaise(totalAmount);
+      const testOrder = getTestOrder(razorpayOrderId);
+      if (testOrder && testOrder.amount !== expected) {
+        this.logger.error(
+          `Payment amount mismatch on ${razorpayOrderId}: test order holds ${testOrder.amount} paise, order comes to ${expected} paise. Recording unpaid.`,
+        );
+        return false;
+      }
+      return true;
+    }
 
     const instance = getRazorpayInstance();
     if (!instance) {
@@ -103,14 +130,59 @@ export class OrdersService {
   async quoteOrder(
     subtotal: number,
     pincode: string,
-  ): Promise<{ shippingCost: number; discount: number; totalAmount: number }> {
-    const shippingCost = await this.resolveShippingCost(pincode);
-    const discount =
+    couponCode?: string,
+    userId?: string,
+  ): Promise<{
+    shippingCost: number;
+    discount: number;
+    totalAmount: number;
+    couponDiscount?: number;
+    couponCode?: string;
+  }> {
+    const shippingCost = await this.resolveShippingCost(pincode, subtotal);
+    const autoDiscount =
       subtotal > 1000 ? Number((subtotal * 0.1).toFixed(2)) : 0;
-    const totalAmount = Number(
-      (subtotal - discount + shippingCost).toFixed(2),
+
+    let couponDiscount = 0;
+    let appliedCouponCode: string | undefined;
+
+    if (couponCode && couponCode.trim()) {
+      try {
+        const result = await this.couponsService.calculateCouponDiscount(
+          couponCode.trim(),
+          subtotal,
+          userId,
+        );
+        couponDiscount = result.discount;
+        appliedCouponCode = result.couponCode;
+      } catch (err: any) {
+        this.logger.warn(`Could not apply coupon "${couponCode}": ${err?.message || err}`);
+        throw err;
+      }
+    }
+
+    const discount = Number(
+      Math.min(subtotal, autoDiscount + couponDiscount).toFixed(2),
     );
-    return { shippingCost, discount, totalAmount };
+    const totalAmount = Number(
+      Math.max(0, subtotal - discount + shippingCost).toFixed(2),
+    );
+    const res: {
+      shippingCost: number;
+      discount: number;
+      totalAmount: number;
+      couponDiscount?: number;
+      couponCode?: string;
+    } = {
+      shippingCost,
+      discount,
+      totalAmount,
+    };
+    if (couponDiscount > 0 || appliedCouponCode) {
+      res.couponDiscount = couponDiscount;
+      res.couponCode = appliedCouponCode;
+    }
+    return res;
   }
 
   private getDiwaliYear(year: number, now: Date): number {
@@ -149,15 +221,19 @@ export class OrdersService {
   async quoteCart(
     cartItems: CreateOrderDto['items'],
     pincode: string,
+    couponCode?: string,
+    userId?: string,
   ): Promise<{
     items: any[];
     subtotal: number;
     shippingCost: number;
     discount: number;
     totalAmount: number;
+    couponDiscount?: number;
+    couponCode?: string;
   }> {
     const { items, subtotal } = await this.priceItems(cartItems);
-    const quote = await this.quoteOrder(subtotal, pincode);
+    const quote = await this.quoteOrder(subtotal, pincode, couponCode, userId);
     return { items, subtotal, ...quote };
   }
 
@@ -179,40 +255,29 @@ export class OrdersService {
       let serverName = item.name?.trim();
       let serverSku = item.sku || '';
       let serverImage = item.image || '';
-      if (item.productId) {
-        if (!Types.ObjectId.isValid(item.productId)) {
-          throw new BadRequestException(`Invalid productId: ${item.productId}`);
-        }
-        const product = await this.productModel
-          .findById(item.productId)
-          .select('name sku images price isActive status')
-          .lean()
-          .exec();
-        if (!product) {
-          throw new BadRequestException(`Product not found: ${item.productId}`);
-        }
-        if (
-          (product as any).isActive === false ||
-          (product as any).status !== 'published'
-        ) {
-          throw new BadRequestException(
-            `Product not available: ${(product as any).name}`,
-          );
-        }
-        serverPrice = (product as any).price;
-        serverName = (product as any).name;
-        serverSku = (product as any).sku || serverSku;
-        serverImage = (product as any).images?.[0] || serverImage;
-      } else {
-        // Custom item without productId — validate price bounds
-        if (
-          !Number.isFinite(serverPrice) ||
-          serverPrice < 0 ||
-          serverPrice > 1000000
-        ) {
-          throw new BadRequestException('Invalid item price');
-        }
+      if (!item.productId || !Types.ObjectId.isValid(item.productId)) {
+        throw new BadRequestException('A valid productId is required for each order item');
       }
+      const product = await this.productModel
+        .findById(item.productId)
+        .select('name sku images price isActive status')
+        .lean()
+        .exec();
+      if (!product) {
+        throw new BadRequestException(`Product not found: ${item.productId}`);
+      }
+      if (
+        (product as any).isActive === false ||
+        (product as any).status !== 'published'
+      ) {
+        throw new BadRequestException(
+          `Product not available: ${(product as any).name}`,
+        );
+      }
+      serverPrice = (product as any).price;
+      serverName = (product as any).name;
+      serverSku = (product as any).sku || serverSku;
+      serverImage = (product as any).images?.[0] || serverImage;
       if (
         !Number.isInteger(item.quantity) ||
         item.quantity < 1 ||
@@ -248,8 +313,20 @@ export class OrdersService {
     // the order records another:
     //   shipping — the pincode's override, else the configured default
     //   discount — 10% once the verified subtotal is over ₹1000
-    const { items, subtotal: serverSubtotal, shippingCost, discount, totalAmount } =
-      await this.quoteCart(createOrderDto.items, createOrderDto.pincode.trim());
+    const {
+      items,
+      subtotal: serverSubtotal,
+      shippingCost,
+      discount,
+      totalAmount,
+      couponDiscount,
+      couponCode: appliedCouponCode,
+    } = await this.quoteCart(
+      createOrderDto.items,
+      createOrderDto.pincode.trim(),
+      createOrderDto.couponCode?.trim(),
+      userId,
+    );
 
     // A payment counts only when Razorpay signed it AND the amount it captured
     // is the amount this order comes to. Without the second half, a client can
@@ -267,7 +344,7 @@ export class OrdersService {
       orderNumber,
       userId: userId ? new Types.ObjectId(userId) : undefined,
       customerName: createOrderDto.customerName.trim(),
-      phone: createOrderDto.phone.trim(),
+      phone: createOrderDto.phone.trim().replace(/\D/g, ''),
       address: createOrderDto.address.trim(),
       pincode: createOrderDto.pincode.trim(),
       items,
@@ -275,6 +352,8 @@ export class OrdersService {
       discount,
       shippingCost,
       totalAmount,
+      couponCode: appliedCouponCode || createOrderDto.couponCode?.trim() || '',
+      couponDiscount: couponDiscount || 0,
       paymentId: paymentVerified
         ? createOrderDto.razorpay_payment_id
         : createOrderDto.paymentId || '',
@@ -356,27 +435,97 @@ export class OrdersService {
   }
 
   async findByUser(userId?: string, phone?: string): Promise<OrderDocument[]> {
-    // Enforce: if userId present, only return that user's orders (ignore phone enumeration)
-    if (userId) {
-      if (!Types.ObjectId.isValid(userId)) return [];
-      return this.orderModel
-        .find({ userId: new Types.ObjectId(userId) })
-        .sort({ createdAt: -1 })
-        .exec();
-    }
-    // Anonymous phone lookup — require phone and limit results
-    if (phone) {
-      const clean = phone.trim().replace(/\s+/g, '');
-      if (!/^\+?[0-9]{10,15}$/.test(clean)) {
-        throw new BadRequestException('Invalid phone format');
+    const conditions: any[] = [];
+    let userOid: Types.ObjectId | undefined;
+
+    if (userId && Types.ObjectId.isValid(userId)) {
+      userOid = new Types.ObjectId(userId);
+      conditions.push({ userId: userOid });
+
+      try {
+        const user = await this.userModel.findById(userOid).exec();
+        if (user?.phone) {
+          const userPhoneDigits = user.phone.trim().replace(/\D/g, '');
+          const last10 = userPhoneDigits.slice(-10);
+          if (last10.length === 10) {
+            const phoneVariants = [
+              userPhoneDigits,
+              last10,
+              `+91${last10}`,
+              `91${last10}`,
+              `0${last10}`,
+            ];
+            conditions.push({ phone: { $in: phoneVariants } });
+
+            // Automatically backfill userId on any unassigned matching orders
+            await this.orderModel
+              .updateMany(
+                { phone: { $in: phoneVariants }, userId: { $exists: false } },
+                { $set: { userId: userOid } },
+              )
+              .exec();
+          }
+        }
+      } catch {
+        // non-blocking
       }
-      return this.orderModel
-        .find({ phone: clean, userId: { $exists: false } })
-        .sort({ createdAt: -1 })
-        .limit(20)
-        .exec();
     }
-    return [];
+
+    if (phone) {
+      const clean = phone.trim().replace(/\D/g, '');
+      const last10 = clean.slice(-10);
+      if (last10.length >= 10) {
+        const phoneVariants = [
+          clean,
+          last10,
+          `+91${last10}`,
+          `91${last10}`,
+          `0${last10}`,
+        ];
+        conditions.push({ phone: { $in: phoneVariants } });
+      }
+    }
+
+    if (conditions.length === 0) {
+      return [];
+    }
+
+    const orders = await this.orderModel
+      .find({ $or: conditions })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .exec();
+
+    // Guest phone lookups (unauthenticated) should mask address & payment IDs to prevent PII harvesting
+    if (!userId) {
+      return orders.map((o) => this.maskSensitiveOrder(o));
+    }
+
+    return orders;
+  }
+
+  private maskSensitiveOrder(order: any): any {
+    const plain: any = order.toObject ? order.toObject() : { ...order };
+    if (plain.customerName) {
+      const parts = plain.customerName.trim().split(/\s+/);
+      plain.customerName = parts
+        .map((p: string) => (p.length > 1 ? p[0] + '*'.repeat(Math.max(1, p.length - 1)) : p))
+        .join(' ');
+    }
+    if (plain.phone) {
+      const digits = String(plain.phone).replace(/\D/g, '');
+      plain.phone = digits.length >= 4 ? '*'.repeat(digits.length - 4) + digits.slice(-4) : '****';
+    }
+    if (plain.address) {
+      plain.address = plain.pincode
+        ? `Delivery to PIN ${plain.pincode}`
+        : 'Residential address (Masked for privacy)';
+    }
+    delete plain.userId; // internal id, not for anonymous lookups
+    if (plain.paymentId) {
+      plain.paymentId = plain.paymentId.length > 8 ? plain.paymentId.slice(0, 4) + '****' : '****';
+    }
+    return plain;
   }
 
   async findOne(id: string, user?: any): Promise<OrderDocument> {
@@ -430,6 +579,10 @@ export class OrdersService {
 
     if (updateTrackingDto.orderStatus) {
       order.orderStatus = updateTrackingDto.orderStatus;
+    }
+    // COD: cash is collected on delivery, so delivered means paid.
+    if (order.orderStatus === 'delivered' && order.paymentStatus === 'pending') {
+      order.paymentStatus = 'paid';
     }
     if (updateTrackingDto.courierName !== undefined) {
       order.courierName = updateTrackingDto.courierName;
@@ -507,6 +660,11 @@ export class OrdersService {
   }
 
   async getSummary() {
+    // Prepaid orders count once paid; COD orders (paymentStatus stays 'pending') once delivered.
+    const isRevenue = (o: { orderStatus: string; paymentStatus: string }) =>
+      o.orderStatus !== 'cancelled' &&
+      (o.paymentStatus === 'paid' || o.orderStatus === 'delivered');
+
     const now = new Date();
     const startOfToday = new Date(
       now.getFullYear(),
@@ -538,7 +696,7 @@ export class OrdersService {
     let cancelledCount = 0;
 
     for (const o of allOrders) {
-      if (o.orderStatus !== 'cancelled' && o.paymentStatus === 'paid') {
+      if (isRevenue(o)) {
         totalWebRevenue += o.totalAmount || 0;
       }
       switch (o.orderStatus) {
@@ -562,7 +720,7 @@ export class OrdersService {
 
     let todayRevenue = 0;
     for (const o of todayOrders) {
-      if (o.orderStatus !== 'cancelled' && o.paymentStatus === 'paid') {
+      if (isRevenue(o)) {
         todayRevenue += o.totalAmount || 0;
       }
     }
@@ -580,4 +738,52 @@ export class OrdersService {
       todayRevenue,
     };
   }
+
+  async trackOrder(queryText?: string, phone?: string): Promise<OrderDocument> {
+    const trimmed = (queryText || '').trim();
+    if (!trimmed) {
+      throw new BadRequestException('Order number or tracking ID is required');
+    }
+
+    const orConditions: any[] = [
+      { orderNumber: trimmed.toUpperCase() },
+      { orderNumber: trimmed },
+      { trackingId: trimmed },
+    ];
+
+    if (Types.ObjectId.isValid(trimmed)) {
+      orConditions.push({ _id: new Types.ObjectId(trimmed) });
+    }
+
+    const order = await this.orderModel.findOne({ $or: orConditions }).exec();
+
+    if (!order) {
+      throw new NotFoundException(
+        `No order found matching "${trimmed}". Please check your order number or tracking ID.`,
+      );
+    }
+
+    let phoneVerified = false;
+    if (phone) {
+      const cleanPhone = phone.trim().replace(/\D/g, '');
+      const orderPhone = (order.phone || '').trim().replace(/\D/g, '');
+      if (cleanPhone.length >= 10 && orderPhone.length >= 10) {
+        if (cleanPhone.slice(-10) !== orderPhone.slice(-10)) {
+          throw new BadRequestException(
+            'The phone number provided does not match this order record.',
+          );
+        }
+        phoneVerified = true;
+      } else {
+        throw new BadRequestException('Please provide a valid 10-digit phone number');
+      }
+    }
+
+    if (phoneVerified) {
+      return order;
+    }
+
+    return this.maskSensitiveOrder(order);
+  }
 }
+

@@ -90,6 +90,30 @@ export class ManagersService {
     return manager;
   }
 
+  async resetPassword(userId: string, password: string) {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (!user.roles.includes(Role.MANAGER)) {
+      throw new BadRequestException('Only manager passwords can be reset here');
+    }
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(password, salt);
+    await user.save();
+    return { success: true, message: 'Password updated successfully' };
+  }
+
+  async removeByUserId(userId: string) {
+    const userIdObj = new Types.ObjectId(userId);
+    await this.managerModel.deleteMany({ user: userIdObj }).exec();
+    const deleted = await this.userModel.findByIdAndDelete(userId).exec();
+    if (!deleted) {
+      throw new NotFoundException('Manager not found');
+    }
+    return { success: true, message: 'Manager removed successfully' };
+  }
+
   async findAll() {
     // 1. Find all users who have the 'manager' role
     const managerUsers = await this.userModel

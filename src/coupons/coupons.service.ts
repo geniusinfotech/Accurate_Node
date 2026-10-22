@@ -133,57 +133,95 @@ export class CouponsService {
     return this.couponModel.find({ isActive: true }).exec();
   }
 
-  async validateCoupon(code: string, userId: string): Promise<Coupon> {
-    const coupon = await this.couponModel.findOne({ code, isActive: true });
+  async validateCoupon(code: string, userId?: string): Promise<Coupon> {
+    if (!code || typeof code !== 'string') {
+      throw new BadRequestException('A valid coupon code is required');
+    }
+    const safeCode = String(code).trim().toUpperCase();
+    const coupon = await this.couponModel.findOne({ code: safeCode, isActive: true });
     if (!coupon) {
       throw new NotFoundException('Invalid or expired coupon');
     }
 
-    const user = await this.userModel.findById(userId);
-    if (!user) throw new NotFoundException('User not found');
-
-    if (user.totalAmountSpent < coupon.minSpendGoal) {
-      throw new Error(
-        `Goal not met. You need to spend ₹${coupon.minSpendGoal - user.totalAmountSpent} more to use this coupon.`,
-      );
-    }
-
     // Date checks
     const now = new Date();
-    if (coupon.validFrom && now < coupon.validFrom)
-      throw new Error('Coupon is not yet active');
-    if (coupon.validUntil && now > coupon.validUntil)
-      throw new Error('Coupon has expired');
+    if (coupon.validFrom && now < coupon.validFrom) {
+      throw new BadRequestException('Coupon is not yet active');
+    }
+    if (coupon.validUntil && now > coupon.validUntil) {
+      throw new BadRequestException('Coupon has expired');
+    }
+
+    const minGoal = coupon.minSpendGoal || 0;
+    if (minGoal > 0) {
+      if (!userId) {
+        throw new BadRequestException('Please log in to use this loyalty coupon');
+      }
+      const user = await this.userModel.findById(userId);
+      if (!user) throw new NotFoundException('User not found');
+
+      const userSpend = user.totalAmountSpent || 0;
+      if (userSpend < minGoal) {
+        throw new BadRequestException(
+          `Goal not met. You need to spend ₹${minGoal - userSpend} more to use this coupon.`,
+        );
+      }
+    }
 
     return coupon;
+  }
+
+  async calculateCouponDiscount(
+    code: string | undefined,
+    subtotal: number,
+    userId?: string,
+  ): Promise<{ discount: number; couponCode?: string; coupon?: Coupon }> {
+    if (!code || !code.trim()) return { discount: 0 };
+    const coupon = await this.validateCoupon(code, userId);
+    let discount = 0;
+    if (coupon.discountType === 'percent') {
+      discount = Number(((subtotal * coupon.discountValue) / 100).toFixed(2));
+    } else {
+      discount = Number(coupon.discountValue);
+    }
+    discount = Math.min(discount, subtotal);
+    return { discount, couponCode: coupon.code, coupon };
   }
 
   async getUserLoyaltyStatus(userId: string) {
     const user = await this.userModel.findById(userId);
     if (!user) throw new NotFoundException('User not found');
 
+    const userSpend = user.totalAmountSpent || 0;
     const allCoupons = await this.couponModel
       .find({ isActive: true })
       .sort({ minSpendGoal: 1 });
 
-    return allCoupons.map((coupon) => {
-      const isUnlocked = user.totalAmountSpent >= coupon.minSpendGoal;
+    const coupons = allCoupons.map((coupon) => {
+      const minGoal = coupon.minSpendGoal || 0;
+      const isUnlocked = userSpend >= minGoal;
       const progress = isUnlocked
         ? 100
-        : (user.totalAmountSpent / coupon.minSpendGoal) * 100;
+        : minGoal > 0 ? (userSpend / minGoal) * 100 : 100;
 
       return {
         id: coupon._id,
         code: coupon.code,
         discountValue: coupon.discountValue,
         discountType: coupon.discountType,
-        minSpendGoal: coupon.minSpendGoal,
+        minSpendGoal: minGoal,
         isUnlocked,
         progress: Math.min(progress, 100),
         remainingSpend: isUnlocked
           ? 0
-          : coupon.minSpendGoal - user.totalAmountSpent,
+          : minGoal - userSpend,
       };
     });
+
+    return {
+      lifetimeSpend: userSpend,
+      unlockedCoupons: coupons.filter(c => c.isUnlocked),
+      coupons,
+    };
   }
 }

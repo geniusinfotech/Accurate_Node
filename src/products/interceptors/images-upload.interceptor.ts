@@ -46,7 +46,7 @@ export const imagesUploadOptions = {
     callback(null, true);
   },
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB per file
-    files: 10, // Max 10 files
+    fileSize: 10 * 1024 * 1024, // 10MB per file
+    files: 20, // Max 20 files
   },
 };

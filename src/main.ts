@@ -1,4 +1,5 @@
 /* eslint-disable prettier/prettier */
+import 'dotenv/config'; // before anything reads process.env at import time
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
@@ -10,7 +11,6 @@ import express from 'express';
 
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
-import { MigrationService } from './scripts/migrate-customer-dealer-links';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -23,6 +23,17 @@ async function bootstrap() {
   /* ---------------- Payload limits ---------------- */
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ limit: '1mb', extended: true }));
+
+  // Transparently route /auth/google and callbacks whether called with or without /api prefix
+  app.use((req: any, res: any, next: any) => {
+    if (req.url && (req.url.startsWith('/auth/google') || req.url === '/auth/google')) {
+      req.url = `/api${req.url}`;
+    }
+    next();
+  });
+
+  // Set global prefix so all routes are under /api
+  app.setGlobalPrefix('api');
 
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:9008';
   const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
@@ -50,7 +61,8 @@ async function bootstrap() {
           frameSrc: ["'none'"],
         },
       },
-      crossOriginResourcePolicy: { policy: 'same-site' },
+      // Product/banner images are loaded by the storefront, which may sit on another site.
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
       hsts: process.env.NODE_ENV === 'production' ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false,
       referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     }),
@@ -93,10 +105,6 @@ async function bootstrap() {
 
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalInterceptors(new TransformInterceptor());
-
-  /* ---------------- Run Migrations ---------------- */
-  const migrationService = app.get(MigrationService);
-  await migrationService.migrateCustomerDealerLinks();
 
   /* ---------------- CORS ---------------- */
   app.enableCors({

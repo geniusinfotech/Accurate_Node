@@ -41,9 +41,9 @@ export class BannersController {
       {
         storage: memoryStorage(),
         fileFilter: (req, file, cb) => {
-          if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp|svg|mp4|webm|ogg|mov)$/i)) {
+          if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp|mp4|webm|ogg|mov)$/i)) {
             return cb(
-              new BadRequestException('Only image and video files are allowed!'),
+              new BadRequestException('Only safe image and video files are allowed!'),
               false,
             );
           }
@@ -91,9 +91,9 @@ export class BannersController {
       {
         storage: memoryStorage(),
         fileFilter: (req, file, cb) => {
-          if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp|svg|mp4|webm|ogg|mov)$/i)) {
+          if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp|mp4|webm|ogg|mov)$/i)) {
             return cb(
-              new BadRequestException('Only image and video files are allowed!'),
+              new BadRequestException('Only safe image and video files are allowed!'),
               false,
             );
           }

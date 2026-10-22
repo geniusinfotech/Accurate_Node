@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Delete,
   Param,
   Body,
@@ -14,8 +15,14 @@ import {
   BadRequestException,
   Request,
   Logger,
+  Res,
 } from '@nestjs/common';
-import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
+import {
+  FileInterceptor,
+  FilesInterceptor,
+  AnyFilesInterceptor,
+} from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import * as path from 'path';
@@ -71,7 +78,7 @@ export class ProductsController {
   @Roles(Role.ADMIN, Role.MANAGER)
   @Permissions(Permission.PRODUCTS_ADD)
   @UseInterceptors(
-    FilesInterceptor('image', 10, {
+    AnyFilesInterceptor({
       storage: diskStorage({
         destination: './uploads/temp',
         filename: (req, file, callback) => {
@@ -99,7 +106,7 @@ export class ProductsController {
         }
         callback(null, true);
       },
-      limits: { fileSize: 5 * 1024 * 1024, files: 10 },
+      limits: { fileSize: 10 * 1024 * 1024, files: 20 },
     }),
   )
   async createWithImage(
@@ -207,57 +214,160 @@ export class ProductsController {
       }
     }
 
+    const parseArrayField = (val: any): string[] | undefined => {
+      if (!val) return undefined;
+      if (Array.isArray(val)) return val.map(String).map((s) => s.trim()).filter(Boolean);
+      if (typeof val === 'string') {
+        const trimmed = val.trim();
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) return parsed.map(String).map((s) => s.trim()).filter(Boolean);
+          } catch {}
+        }
+        return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      return undefined;
+    };
+
+    const parseJsonField = <T>(val: any): T | undefined => {
+      if (!val) return undefined;
+      if (typeof val === 'object') return val;
+      if (typeof val === 'string') {
+        try {
+          return JSON.parse(val);
+        } catch {}
+      }
+      return undefined;
+    };
+
     const dto = new CreateProductDto();
     dto.name = name;
     dto.price = price;
     dto.stock = stock;
     dto.description = description;
-    dto.images = imageUrls;
+    dto.shortDescription = typeof body.shortDescription === 'string' ? body.shortDescription : undefined;
+    const bodyImages = parseArrayField(body.images) || [];
+    dto.images = [...imageUrls, ...bodyImages];
     dto.brandId = brandId;
     dto.categoryId = categoryId;
-    dto.status = body.sourceStockId ? 'published' : 'pending';
     dto.sku = body.sku;
+    dto.productType = body.productType || 'liquid_detergent';
+    dto.productForm = body.productForm || 'Liquid';
+    dto.isConcentrated = body.isConcentrated === 'true' || body.isConcentrated === true;
+    if (body.concentration) dto.concentration = body.concentration;
+    if (body.phValue !== undefined && body.phValue !== '') dto.phValue = parseFloat(body.phValue);
+    if (body.fragrance) dto.fragrance = body.fragrance;
+    if (body.color) dto.color = body.color;
+    dto.availableFragrances = parseArrayField(body.availableFragrances);
+    dto.ingredients = parseArrayField(body.ingredients);
+    if (body.ingredientDescription) dto.ingredientDescription = body.ingredientDescription;
+    dto.benefits = parseArrayField(body.benefits);
+    dto.features = parseArrayField(body.features);
+
+    // Parse nested objects
+    const usage = parseJsonField<any>(body.usage);
+    if (usage) {
+      dto.usage = {
+        usageInstructions: usage.usageInstructions || body.usageInstructions,
+        dilutionInstructions: usage.dilutionInstructions || body.dilutionInstructions,
+        recommendedDosage: usage.recommendedDosage || body.recommendedDosage,
+        suitableFor: parseArrayField(usage.suitableFor || body.suitableFor),
+        notSuitableFor: parseArrayField(usage.notSuitableFor || body.notSuitableFor),
+      };
+    } else if (body.usageInstructions || body.dilutionInstructions || body.recommendedDosage) {
+      dto.usage = {
+        usageInstructions: body.usageInstructions,
+        dilutionInstructions: body.dilutionInstructions,
+        recommendedDosage: body.recommendedDosage,
+        suitableFor: parseArrayField(body.suitableFor),
+        notSuitableFor: parseArrayField(body.notSuitableFor),
+      };
+    }
+
+    const safety = parseJsonField<any>(body.safety);
+    if (safety) {
+      dto.safety = {
+        safetyInstructions: safety.safetyInstructions || body.safetyInstructions,
+        firstAidInstructions: safety.firstAidInstructions || body.firstAidInstructions,
+        keepAwayFromChildren: safety.keepAwayFromChildren !== undefined ? Boolean(safety.keepAwayFromChildren) : true,
+        avoidEyeContact: Boolean(safety.avoidEyeContact),
+        doNotIngest: safety.doNotIngest !== undefined ? Boolean(safety.doNotIngest) : true,
+        doNotMixWithOtherCleaners: Boolean(safety.doNotMixWithOtherCleaners),
+      };
+    } else if (body.safetyInstructions || body.firstAidInstructions || body.keepAwayFromChildren !== undefined) {
+      dto.safety = {
+        safetyInstructions: body.safetyInstructions,
+        firstAidInstructions: body.firstAidInstructions,
+        keepAwayFromChildren: body.keepAwayFromChildren === 'true' || body.keepAwayFromChildren === true,
+        avoidEyeContact: body.avoidEyeContact === 'true' || body.avoidEyeContact === true,
+        doNotIngest: body.doNotIngest === 'true' || body.doNotIngest === true,
+        doNotMixWithOtherCleaners: body.doNotMixWithOtherCleaners === 'true' || body.doNotMixWithOtherCleaners === true,
+      };
+    }
+
+    const packaging = parseJsonField<any>(body.packaging);
+    if (packaging) {
+      dto.packaging = {
+        type: packaging.type || body.packagingType,
+        material: packaging.material || body.packagingMaterial,
+        closureType: packaging.closureType || body.closureType,
+      };
+    } else if (body.packagingType || body.packagingMaterial || body.closureType) {
+      dto.packaging = {
+        type: body.packagingType,
+        material: body.packagingMaterial,
+        closureType: body.closureType,
+      };
+    }
+
     if (body.mrp) dto.mrp = parseFloat(body.mrp);
-    if (body.discountPercent !== undefined)
+    if (body.discountPercent !== undefined && body.discountPercent !== '')
       dto.discountPercent = parseFloat(body.discountPercent);
-    if (body.reservedStock !== undefined)
+    if (body.reservedStock !== undefined && body.reservedStock !== '')
       dto.reservedStock = parseInt(body.reservedStock, 10);
-    if (body.discount !== undefined) dto.discount = parseFloat(body.discount);
-    if (body.tags)
-      dto.tags =
-        typeof body.tags === 'string'
-          ? body.tags.split(',').map((t: string) => t.trim())
-          : body.tags;
+    if (body.discount !== undefined && body.discount !== '')
+      dto.discount = parseFloat(body.discount);
+    dto.tags = parseArrayField(body.tags);
+    dto.keywords = parseArrayField(body.keywords);
+    if (body.metaTitle) dto.metaTitle = body.metaTitle;
+    if (body.metaDescription) dto.metaDescription = body.metaDescription;
+
+    if (body.warranty) dto.warranty = body.warranty;
+    if (body.shelfLife) dto.shelfLife = body.shelfLife;
+    if (body.storageInstructions) dto.storageInstructions = body.storageInstructions;
+    dto.certifications = parseArrayField(body.certifications);
+    if (body.hsnCode) dto.hsnCode = body.hsnCode;
+    if (body.gstRate) dto.gstRate = body.gstRate;
+    if (body.batchNumber) dto.batchNumber = body.batchNumber;
+    if (body.manufacturingDate) dto.manufacturingDate = new Date(body.manufacturingDate);
+    if (body.expiryDate) dto.expiryDate = new Date(body.expiryDate);
+
+    if (body.slug) dto.slug = body.slug;
+    if (body.videoUrl) dto.videoUrl = body.videoUrl;
+    const rawVariants = parseJsonField<any[]>(body.variants);
+    if (Array.isArray(rawVariants)) {
+      dto.variants = rawVariants.map((v: any) => ({
+        ...v,
+        packSize: v.packSize !== undefined && v.packSize !== '' ? Number(v.packSize) : v.packSize,
+        price: v.price !== undefined ? Number(v.price) : v.price,
+        mrp: v.mrp !== undefined && v.mrp !== '' && v.mrp !== null ? Number(v.mrp) : undefined,
+        stock: v.stock !== undefined ? Number(v.stock) : v.stock,
+      })) as any;
+    }
+
     if (body.isFeatured !== undefined)
       dto.isFeatured = body.isFeatured === 'true' || body.isFeatured === true;
     if (body.isNewArrival !== undefined)
-      dto.isNewArrival =
-        body.isNewArrival === 'true' || body.isNewArrival === true;
+      dto.isNewArrival = body.isNewArrival === 'true' || body.isNewArrival === true;
     if (body.isBestseller !== undefined)
-      dto.isBestseller =
-        body.isBestseller === 'true' || body.isBestseller === true;
-    if (body.isCombo !== undefined)
-      dto.isCombo = body.isCombo === 'true' || body.isCombo === true;
+      dto.isBestseller = body.isBestseller === 'true' || body.isBestseller === true;
     if (body.isPremium !== undefined)
       dto.isPremium = body.isPremium === 'true' || body.isPremium === true;
-    if (body.isHypoallergenic !== undefined)
-      dto.isHypoallergenic =
-        body.isHypoallergenic === 'true' || body.isHypoallergenic === true;
-    if (body.closureType) dto.closureType = body.closureType;
-    if (body.warranty) dto.warranty = body.warranty;
-    if (body.careInstructions) dto.careInstructions = body.careInstructions;
-    if (body.occasion)
-      dto.occasion =
-        typeof body.occasion === 'string'
-          ? body.occasion
-              .split(',')
-              .map((o: string) => o.trim())
-              .filter(Boolean)
-          : body.occasion;
-    if (body.slug) dto.slug = body.slug;
-    if (body.sourceStockId) dto.sourceStockId = body.sourceStockId;
-    if (body.videoUrl) dto.videoUrl = body.videoUrl;
-    if (material) dto.material = { baseMetal: material } as any;
+    if (body.isActive !== undefined)
+      dto.isActive = body.isActive === 'true' || body.isActive === true;
+
+    dto.status = body.status || 'published';
 
     return this.productsService.create(dto);
   }
@@ -275,19 +385,31 @@ export class ProductsController {
   async uploadExcel(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: ExcelUploadDto,
-    @Request() req,
   ) {
     if (!file) {
       throw new BadRequestException('Excel file is required');
     }
 
-    const userId = req.user.userId || req.user.sub;
     return this.productsService.bulkUploadFromExcel(
       file,
       dto.brandId,
       dto.categoryId,
-      userId,
     );
+  }
+
+  /** Blank spreadsheet for bulk import (Admin only). Declared before ':id' routes. */
+  @Get('import-template')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @Permissions(Permission.PRODUCTS_ADD)
+  async importTemplate(@Res() res: Response) {
+    const file = await this.productsService.buildImportTemplate();
+    res.set({
+      'Content-Type':
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': 'attachment; filename="product-import-template.xlsx"',
+    });
+    res.send(file);
   }
 
   /**
@@ -314,7 +436,7 @@ export class ProductsController {
   @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
   @Roles(Role.ADMIN, Role.MANAGER)
   @Permissions(Permission.PRODUCTS_ADD)
-  @UseInterceptors(FilesInterceptor('images', 10, imagesUploadOptions))
+  @UseInterceptors(AnyFilesInterceptor(imagesUploadOptions))
   async uploadImages(
     @Param('id') id: string,
     @UploadedFiles() files: Express.Multer.File[],
@@ -327,6 +449,27 @@ export class ProductsController {
   }
 
   /**
+   * Upload images for a specific product variant (Admin only).
+   * Images appended to the variant fall back to product images on the storefront when empty.
+   */
+  @Put(':id/variants/:key/images')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @Permissions(Permission.PRODUCTS_ADD)
+  @UseInterceptors(AnyFilesInterceptor(imagesUploadOptions))
+  async uploadVariantImages(
+    @Param('id') id: string,
+    @Param('key') key: string,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    if (!files || files.length === 0) {
+      throw new BadRequestException('At least one image is required');
+    }
+
+    return this.productsService.uploadVariantImages(id, key, files);
+  }
+
+  /**
    * Update a product (Admin only)
    */
   @Put(':id')
@@ -334,6 +477,14 @@ export class ProductsController {
   @Roles(Role.ADMIN, Role.MANAGER)
   @Permissions(Permission.PRODUCTS_EDIT)
   async update(@Param('id') id: string, @Body() dto: UpdateProductDto) {
+    return this.productsService.update(id, dto);
+  }
+
+  @Patch(':id')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @Permissions(Permission.PRODUCTS_EDIT)
+  async updatePatch(@Param('id') id: string, @Body() dto: UpdateProductDto) {
     return this.productsService.update(id, dto);
   }
 
@@ -372,7 +523,7 @@ export class ProductsController {
     if (limitNum > 50) limitNum = 50;
     if (pageNum > 1000) pageNum = 1000;
     const filters: any = { page: pageNum, limit: limitNum };
-    const allowedSorts = ['price_asc', 'price_desc', 'newest', 'rating'];
+    const allowedSorts = ['price_asc', 'price_desc', 'newest'];
     if (sort && !allowedSorts.includes(String(sort))) {
       throw new BadRequestException('Invalid sort value');
     }

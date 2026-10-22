@@ -50,8 +50,17 @@ export class TestimonialsController {
   @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
   @Roles(Role.ADMIN, Role.MANAGER)
   @Permissions(Permission.TESTIMONIALS_ADD)
-  @Post()
-  @UseInterceptors(FileInterceptor('image'))
+  @UseInterceptors(
+    FileInterceptor('image', {
+      fileFilter: (req, file, cb) => {
+        if (!file.originalname.match(/\.(jpg|jpeg|png|webp)$/i)) {
+          return cb(new BadRequestException('Only image files are allowed (jpg, jpeg, png, webp)!'), false);
+        }
+        cb(null, true);
+      },
+      limits: { fileSize: 10 * 1024 * 1024 },
+    }),
+  )
   async create(
     @Body() dto: CreateTestimonialWithFileDto,
     @UploadedFile() file?: Express.Multer.File,
@@ -63,8 +72,9 @@ export class TestimonialsController {
       } else if (file.buffer) {
         // File is in memory, save it to disk
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        const ext = file.originalname.split('.').pop() || 'jpg, png, jpeg';
-        const filename = `testimonial-${uniqueSuffix}.${ext}`;
+        const match = file.originalname.match(/\.(jpg|jpeg|png|webp)$/i);
+        const ext = match ? match[0].toLowerCase() : '.jpg';
+        const filename = `testimonial-${uniqueSuffix}${ext}`;
 
         const fs = require('fs');
         const path = require('path');
@@ -97,7 +107,17 @@ export class TestimonialsController {
   @Roles(Role.ADMIN, Role.MANAGER)
   @Permissions(Permission.TESTIMONIALS_EDIT)
   @Patch(':id')
-  @UseInterceptors(FileInterceptor('image'))
+  @UseInterceptors(
+    FileInterceptor('image', {
+      fileFilter: (req, file, cb) => {
+        if (!file.originalname.match(/\.(jpg|jpeg|png|webp)$/i)) {
+          return cb(new BadRequestException('Only image files are allowed (jpg, jpeg, png, webp)!'), false);
+        }
+        cb(null, true);
+      },
+      limits: { fileSize: 10 * 1024 * 1024 },
+    }),
+  )
   async update(
     @Param('id') id: string,
     @Body() dto: CreateTestimonialWithFileDto,
@@ -110,8 +130,9 @@ export class TestimonialsController {
         dto.image = file.filename;
       } else if (file.buffer) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        const ext = file.originalname.split('.').pop() || 'jpg, png, jpeg';
-        const filename = `testimonial-${uniqueSuffix}.${ext}`;
+        const match = file.originalname.match(/\.(jpg|jpeg|png|webp)$/i);
+        const ext = match ? match[0].toLowerCase() : '.jpg';
+        const filename = `testimonial-${uniqueSuffix}${ext}`;
 
         const fs = require('fs');
         const path = require('path');

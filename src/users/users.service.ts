@@ -1,5 +1,5 @@
 /* eslint-disable prettier/prettier */
-import { Injectable, NotFoundException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User, UserDocument } from './schema/user.schema';
@@ -61,7 +61,7 @@ export class UsersService {
   }
 
   async findAll(): Promise<User[]> {
-    return this.excludeSensitiveData(this.userModel.find().select('-resetPasswordToken -resetPasswordExpires -googleId -githubId'));
+    return this.excludeSensitiveData(this.userModel.find().select('-resetPasswordToken -resetPasswordExpires -refreshTokenHash -googleId -githubId'));
   }
 
   async remove(id: string): Promise<{ success: boolean; message: string }> {
@@ -122,33 +122,57 @@ export class UsersService {
   }
 
   async findOrCreateGoogleUser(profile: any): Promise<UserDocument> {
-    let user = await this.userModel.findOne({ googleId: profile.id });
+    const googleId = profile.id || profile.sub;
+    let user = await this.userModel.findOne({ googleId });
 
     if (!user) {
       // Check if user exists with same email
-      user = await this.userModel.findOne({ email: profile.emails[0].value });
+      const email = (
+        profile.emails?.[0]?.value ||
+        profile.email ||
+        ''
+      ).toLowerCase().trim();
+
+      if (email) {
+        user = await this.userModel.findOne({ email });
+      }
 
       if (user) {
         // Link Google account to existing user
-        user.googleId = profile.id;
+        user.googleId = googleId;
+        if (user.isActive === false) {
+          user.isActive = true;
+        }
+        if (!user.avatar && (profile.photos?.[0]?.value || profile.picture)) {
+          user.avatar = profile.photos?.[0]?.value || profile.picture;
+        }
         await user.save();
       } else {
-        // Create new user
+        // Create new user with active status
+        const givenName = profile.name?.givenName || profile.given_name || 'Google';
+        const familyName = profile.name?.familyName || profile.family_name || 'User';
+        const displayName =
+          profile.displayName ||
+          profile.name ||
+          (email ? email.split('@')[0] : `user_${Date.now()}`);
+
         const newUser = new this.userModel({
-          googleId: profile.id,
-          email: profile.emails[0].value,
-          firstname: profile.name?.givenName || 'Google',
-          lastname: profile.name?.familyName || 'User',
-          username: profile.displayName || profile.emails[0].value.split('@')[0],
+          googleId,
+          email,
+          firstname: givenName,
+          lastname: familyName,
+          username: displayName,
           roles: [Role.USER],
-          isActive: false,
-          phone: '', // Google doesn't always provide phone, need to handle strict requirement or bypass for google users? User schema says phone required: true. I should probably set a placeholder or make it optional for google users?
-          // But 'phone' is required: true in Schema.
-          // I will set a placeholder or empty string if allowed.
-          address: { street: '', city: '', state: '', zip: '', country: '' }, // Placeholder for required address
+          isActive: true,
+          phone: '',
+          address: { street: '', city: '', state: '', zip: '', country: '' },
+          avatar: profile.photos?.[0]?.value || profile.picture || '',
         });
         user = await newUser.save();
       }
+    } else if (user.isActive === false) {
+      user.isActive = true;
+      await user.save();
     }
 
     return user;
@@ -160,8 +184,19 @@ export class UsersService {
     const user = await this.findById(userId);
     if (!user) return null;
     if (!user.addresses) user.addresses = [];
+    if (!addressData || typeof addressData !== 'object' || Array.isArray(addressData)) {
+      throw new BadRequestException('Invalid address');
+    }
+    // Reject prototype-pollution keys. NOTE: must use Object.keys — every
+    // object inherits `.constructor` via its prototype, so a truthiness check
+    // like `addressData.constructor` fires for ALL inputs.
+    for (const k of Object.keys(addressData)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') {
+        throw new BadRequestException('Invalid address');
+      }
+    }
     // Validate allowlist
-    const allowedKeys = ['street', 'city', 'state', 'zip', 'country', 'isDefault', 'label', 'phone'];
+    const allowedKeys = ['street', 'line1', 'line2', 'city', 'state', 'zip', 'pincode', 'country', 'isDefault', 'label', 'phone'];
     const clean: any = {};
     for (const k of allowedKeys) {
       if (addressData[k] !== undefined) {
@@ -169,9 +204,20 @@ export class UsersService {
         else if (typeof addressData[k] === 'boolean') clean[k] = addressData[k];
       }
     }
-    if (!clean.street || !clean.city) throw new Error('Street and city are required');
-    if (clean.zip && !/^[0-9A-Za-z\s-]{3,12}$/.test(clean.zip)) throw new Error('Invalid zip');
-    if (addressData.__proto__ || addressData.constructor || addressData.prototype) throw new Error('Invalid address');
+    const streetVal = clean.street || clean.line1;
+    const cityVal = clean.city;
+    if (!streetVal || !cityVal) throw new BadRequestException('Street and city are required');
+    const zipVal = clean.zip || clean.pincode;
+    if (zipVal && !/^[0-9A-Za-z\s-]{3,12}$/.test(zipVal)) throw new BadRequestException('Invalid zip');
+
+    // Ensure both alias names are saved so frontend always gets full address
+    clean.street = streetVal;
+    clean.line1 = streetVal;
+    if (zipVal) {
+      clean.zip = zipVal;
+      clean.pincode = zipVal;
+    }
+
     if (clean.isDefault || user.addresses.length === 0) {
       user.addresses.forEach((a) => (a.isDefault = false));
       clean.isDefault = true;

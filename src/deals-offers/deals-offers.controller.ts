@@ -66,7 +66,8 @@ export class DealsOffersController {
     if (file) {
       try {
         const filename = await this.imageUtils.compressImage(file);
-        dto.image = filename;
+        // Store the public URL path (files are served from /uploads/).
+        dto.image = `/uploads/${filename}`;
       } catch (error) {
         console.error('Error processing image:', error);
         throw new BadRequestException(
@@ -92,7 +93,8 @@ export class DealsOffersController {
     if (file) {
       try {
         const filename = await this.imageUtils.compressImage(file);
-        dto.image = filename;
+        // Store the public URL path (files are served from /uploads/).
+        dto.image = `/uploads/${filename}`;
       } catch (error) {
         console.error('Error processing image:', error);
         throw new BadRequestException(

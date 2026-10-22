@@ -3,7 +3,9 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../users/users.service';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
@@ -14,6 +16,7 @@ import { Role } from './roles.enum';
 import { EmailService } from './email.service';
 import * as crypto from 'crypto';
 import { ActivityService } from '../managers/activity.service';
+import axios from 'axios';
 
 @Injectable()
 export class AuthService {
@@ -22,6 +25,7 @@ export class AuthService {
     private jwtService: JwtService,
     private emailService: EmailService,
     private activityService: ActivityService,
+    private configService: ConfigService,
   ) { }
 
   async validateUser(
@@ -171,18 +175,32 @@ export class AuthService {
     const exists = await this.usersService.findByEmail(normalizedEmail);
     if (exists) throw new UnauthorizedException('Email already exists');
 
+    // Support legacy `name` payload from the storefront signup form.
+    let firstname = createUserDto.firstname?.trim();
+    let lastname = createUserDto.lastname?.trim();
+    const fullName = (createUserDto as any)?.name?.trim();
+    if ((!firstname || !lastname) && fullName) {
+      const [first, ...rest] = fullName.split(/\s+/);
+      firstname = firstname || first;
+      lastname = lastname || (rest.join(' ') || first);
+    }
+    if (!firstname || firstname.length < 2)
+      throw new BadRequestException('firstname must be at least 2 characters');
+    if (!lastname || lastname.length < 2)
+      throw new BadRequestException('lastname must be at least 2 characters');
+
     const salt = await bcrypt.genSalt(12);
     const hash = await bcrypt.hash(createUserDto.password, salt);
 
     const userData = {
       email: normalizedEmail,
-      firstname: createUserDto.firstname.trim(),
-      lastname: createUserDto.lastname.trim(),
+      firstname,
+      lastname,
       username: normalizedEmail.split('@')[0],
       password: hash,
       phone: createUserDto.phone?.trim(),
       address: createUserDto.address,
-      roles: createUserDto.roles && createUserDto.roles.length > 0 ? createUserDto.roles : [Role.USER],
+      roles: [Role.USER],
     };
 
     // @ts-ignore
@@ -225,6 +243,10 @@ export class AuthService {
     const hash = await bcrypt.hash(newPassword, salt);
 
     await this.usersService.updatePassword(userId, hash);
+    // Invalidate all existing sessions so the user must log in again
+    // with the new password. Refresh token is hashed in DB — clearing it
+    // prevents silent re-issue of access tokens after the change.
+    await this.usersService.updateRefreshToken(userId, null);
 
     return { message: 'Password changed successfully' };
   }
@@ -247,7 +269,16 @@ export class AuthService {
     const expires = new Date(Date.now() + 3600000); // 1 hour
 
     await this.usersService.setResetPasswordToken(email, hashedToken, expires);
-    await this.emailService.sendPasswordResetEmail(email, resetToken);
+    try {
+      await this.emailService.sendPasswordResetEmail(email, resetToken);
+    } catch {
+      // Don't leave a stale token behind, and don't surface a 500 with a
+      // stack trace — SMTP outages are a downstream failure (503), not a bug.
+      await this.usersService.clearResetToken(user._id.toString()).catch(() => undefined);
+      throw new ServiceUnavailableException(
+        'Email service is temporarily unavailable, please try again later',
+      );
+    }
 
     return {
       message: 'If the email exists, a password reset link has been sent',
@@ -298,5 +329,87 @@ export class AuthService {
     return this.login(userResponse);
   }
 
+  /**
+   * Server-Side Authorization Code Flow:
+   * Exchanges an OAuth authorization code from Google for tokens using client secret,
+   * retrieves verified profile details from Google's UserInfo API,
+   * then finds or creates the user and creates application session tokens.
+   */
+  async exchangeGoogleCodeAndLogin(
+    code: string,
+    redirectUri?: string,
+  ): Promise<{
+    access_token: string;
+    refresh_token: string;
+    userId: string;
+    email: string;
+    roles: Role[];
+    createdAt: Date;
+    updatedAt: Date;
+    username?: string;
+  }> {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const configuredCallback = this.configService.get<string>(
+      'GOOGLE_CALLBACK_URL',
+      'http://localhost:9010/auth/google/callback',
+    );
+
+    if (!clientId || !clientSecret) {
+      throw new BadRequestException('Google OAuth is not configured on the server');
+    }
+
+    const tokenUrl = 'https://oauth2.googleapis.com/token';
+    const params = new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri || configuredCallback,
+      grant_type: 'authorization_code',
+    });
+
+    let tokenRes: any;
+    try {
+      tokenRes = await axios.post(tokenUrl, params.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+    } catch (err: any) {
+      // If error was redirect_uri_mismatch, try fallback 'postmessage' or configuredCallback
+      const targetUri = redirectUri === 'postmessage' ? configuredCallback : 'postmessage';
+      params.set('redirect_uri', targetUri);
+      try {
+        tokenRes = await axios.post(tokenUrl, params.toString(), {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+      } catch (fallbackErr: any) {
+        const errorDesc =
+          err?.response?.data?.error_description ||
+          err?.response?.data?.error ||
+          err.message;
+        throw new BadRequestException(`Google authorization code exchange failed: ${errorDesc}`);
+      }
+    }
+
+    const { access_token } = tokenRes.data;
+
+    // Fetch user profile from Google UserInfo endpoint using access token
+    const userInfoRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+
+    const googleProfile = userInfoRes.data;
+    const user = await this.usersService.findOrCreateGoogleUser({
+      id: googleProfile.sub,
+      emails: [{ value: googleProfile.email }],
+      name: {
+        givenName: googleProfile.given_name,
+        familyName: googleProfile.family_name,
+      },
+      displayName: googleProfile.name,
+      photos: [{ value: googleProfile.picture }],
+    });
+
+    return this.googleLogin(user);
+  }
 
 }

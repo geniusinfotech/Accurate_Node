@@ -8,9 +8,11 @@ import {
   Body,
   UseGuards,
   Request,
+  BadRequestException,
 } from '@nestjs/common';
 import { CouponsService } from './coupons.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { PermissionsGuard } from '../auth/permissions.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -47,9 +49,13 @@ export class CouponsController {
   }
 
   @Post('validate')
-  @UseGuards(JwtAuthGuard)
-  async validateCoupon(@Body('code') code: string, @Request() req) {
-    return this.couponsService.validateCoupon(code, req.user.userId);
+  @UseGuards(OptionalJwtAuthGuard)
+  async validateCoupon(@Body('code') code: any, @Request() req) {
+    if (!code || typeof code !== 'string' || !code.trim()) {
+      throw new BadRequestException('A valid coupon code string is required');
+    }
+    const userId = req.user?.userId || req.user?.sub || req.user?.id || req.user?._id;
+    return this.couponsService.validateCoupon(code.trim().toUpperCase(), userId);
   }
 
   @Get(':id')

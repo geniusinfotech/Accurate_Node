@@ -9,6 +9,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
@@ -60,6 +61,27 @@ export class OrdersController {
     @Query('to') to?: string,
   ) {
     return this.ordersService.findAll(status, { date, from, to });
+  }
+
+  // Order numbers are sequential, so keep guessing slow.
+  @Get('track/:orderNumber')
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  trackOrder(
+    @Param('orderNumber') orderNumber: string,
+    @Query('phone') phone?: string,
+  ) {
+    return this.ordersService.trackOrder(orderNumber, phone);
+  }
+
+  @Get('track')
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  trackOrderQuery(
+    @Query('number') number?: string,
+    @Query('orderNumber') orderNumber?: string,
+    @Query('phone') phone?: string,
+  ) {
+    const q = orderNumber || number;
+    return this.ordersService.trackOrder(q, phone);
   }
 
   @Get(':id')

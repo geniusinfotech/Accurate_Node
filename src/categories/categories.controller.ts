@@ -32,8 +32,34 @@ export class CategoriesController {
     @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
     @Roles(Role.ADMIN, Role.MANAGER)
     @Permissions(Permission.CATEGORIES_ADD)
-    create(@Body() createCategoryDto: CreateCategoryDto) {
-        return this.categoriesService.create(createCategoryDto);
+    @UseInterceptors(
+        FileInterceptor('image', {
+            storage: memoryStorage(),
+            fileFilter: (req, file, cb) => {
+                if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
+                    return cb(new BadRequestException('Only image files are allowed (jpg, jpeg, png, gif, webp)!'), false);
+                }
+                cb(null, true);
+            },
+            limits: { fileSize: 10 * 1024 * 1024 },
+        }),
+    )
+    create(
+        @Body() createCategoryDto: any,
+        @UploadedFile() file?: Express.Multer.File,
+    ) {
+        if (typeof createCategoryDto.showOnHomepage === 'string') {
+            createCategoryDto.showOnHomepage = createCategoryDto.showOnHomepage === 'true';
+        }
+        if (typeof createCategoryDto.isActive === 'string') {
+            createCategoryDto.isActive = createCategoryDto.isActive === 'true';
+        }
+
+        let newImageFilename: string | undefined;
+        if (file) {
+            newImageFilename = this.categoriesService.saveImage(file);
+        }
+        return this.categoriesService.create(createCategoryDto, newImageFilename);
     }
 
     @Get()
@@ -54,8 +80,8 @@ export class CategoriesController {
         FileInterceptor('image', {
             storage: memoryStorage(),
             fileFilter: (req, file, cb) => {
-                if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
-                    return cb(new BadRequestException('Only image files are allowed!'), false);
+                if (!file.originalname.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
+                    return cb(new BadRequestException('Only image files are allowed (jpg, jpeg, png, gif, webp)!'), false);
                 }
                 cb(null, true);
             },

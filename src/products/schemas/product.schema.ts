@@ -3,72 +3,138 @@ import { Document, Schema as MongooseSchema } from 'mongoose';
 
 export type ProductDocument = Product & Document;
 
-// --- Sub-Schemas (Embedded) ---
+// ======================================================
+// PRODUCT VARIANT
+// ======================================================
 
 @Schema({ _id: false })
-export class Variant {
-  @Prop({ required: true })
+export class ProductVariant {
+  @Prop({ trim: true })
   variantId: string;
 
-  @Prop()
+  @Prop({ required: true, uppercase: true, trim: true })
+  sku: string;
+
+  @Prop({ trim: true })
+  weight?: string;
+
+  @Prop({ min: 0.01 })
+  packSize?: number;
+
+  @Prop({
+    enum: ['ml', 'L', 'gm', 'kg'],
+  })
+  packUnit?: string;
+
+  @Prop({ trim: true })
+  fragrance?: string;
+
+  @Prop({ trim: true })
   color?: string;
 
-  @Prop()
-  size?: string;
+  @Prop({ required: true, min: 0 })
+  price: number;
 
-  @Prop({ required: true, default: 0, min: 0 })
+  @Prop({ min: 0 })
+  mrp?: number;
+
+  @Prop({ default: 0, min: 0 })
   stock: number;
 
   @Prop({ type: [String], default: [] })
   images: string[];
+
+  @Prop({ default: true })
+  isActive: boolean;
 }
 
-export const VariantSchema = SchemaFactory.createForClass(Variant);
+export const ProductVariantSchema =
+  SchemaFactory.createForClass(ProductVariant);
+
+// ======================================================
+// PACKAGING
+// ======================================================
 
 @Schema({ _id: false })
-export class MaterialInfo {
+export class Packaging {
   @Prop({ trim: true })
-  baseMetal?: string; // e.g., Brass, Copper, Stainless Steel, Alloy
+  type?: string;
 
   @Prop({ trim: true })
-  plating?: string; // e.g., 22K Gold Plated, Rhodium, Rose Gold, Antique Gold
+  material?: string;
+
+  @Prop({ trim: true })
+  closureType?: string;
+}
+
+export const PackagingSchema =
+  SchemaFactory.createForClass(Packaging);
+
+// ======================================================
+// USAGE INFORMATION
+// ======================================================
+
+@Schema({ _id: false })
+export class UsageInfo {
+  @Prop({ trim: true })
+  usageInstructions?: string;
+
+  @Prop({ trim: true })
+  dilutionInstructions?: string;
+
+  @Prop({ trim: true })
+  recommendedDosage?: string;
 
   @Prop({ type: [String], default: [] })
-  stoneType?: string[]; // e.g., ["Kundan", "Cubic Zirconia", "Pearls"]
+  suitableFor: string[];
 
-  @Prop({ trim: true })
-  finish?: string; // e.g., Glossy, Antique, Matte, Oxidised
+  @Prop({ type: [String], default: [] })
+  notSuitableFor: string[];
 }
 
-export const MaterialInfoSchema = SchemaFactory.createForClass(MaterialInfo);
+export const UsageInfoSchema =
+  SchemaFactory.createForClass(UsageInfo);
+
+// ======================================================
+// SAFETY INFORMATION
+// ======================================================
 
 @Schema({ _id: false })
-export class Dimensions {
+export class SafetyInfo {
   @Prop({ trim: true })
-  necklaceLength?: string;
+  safetyInstructions?: string;
 
   @Prop({ trim: true })
-  earringDrop?: string;
+  firstAidInstructions?: string;
 
-  @Prop({ trim: true })
-  bangleDiameter?: string;
+  @Prop({ default: true })
+  keepAwayFromChildren: boolean;
 
-  @Prop({ trim: true })
-  pendantSize?: string;
+  @Prop({ default: false })
+  avoidEyeContact: boolean;
 
-  @Prop({ type: Number, min: 0 })
-  weightGrams?: number; // Numeric weight allows filtering by light/heavy items
+  @Prop({ default: true })
+  doNotIngest: boolean;
 
-  @Prop({ trim: true })
-  weight?: string; // Legacy string weight representation
+  @Prop({ default: false })
+  doNotMixWithOtherCleaners: boolean;
 }
 
-export const DimensionsSchema = SchemaFactory.createForClass(Dimensions);
+export const SafetyInfoSchema =
+  SchemaFactory.createForClass(SafetyInfo);
 
-// --- Main Product Schema ---
+// ======================================================
+// MAIN PRODUCT
+// ======================================================
 
-@Schema({ timestamps: true })
+@Schema({
+  timestamps: true,
+})
 export class Product {
+  // ====================================================
+  // BASIC INFORMATION
+  // ====================================================
+
   @Prop({
     type: MongooseSchema.Types.ObjectId,
     ref: 'Brand',
@@ -84,7 +150,10 @@ export class Product {
   })
   categoryId: MongooseSchema.Types.ObjectId;
 
-  @Prop({ required: true, trim: true })
+  @Prop({
+    required: true,
+    trim: true,
+  })
   name: string;
 
   @Prop({
@@ -94,158 +163,421 @@ export class Product {
     lowercase: true,
     trim: true,
   })
-  slug: string;
+  slug?: string;
 
   @Prop({
-    unique: true,
     required: true,
+    unique: true,
     index: true,
     uppercase: true,
     trim: true,
   })
   sku: string;
 
-  @Prop({ required: true, min: 0 })
-  price: number;
+  @Prop({
+    trim: true,
+  })
+  shortDescription?: string;
 
-  @Prop({ min: 0 })
-  mrp?: number;
-
-  @Prop({ default: 0, min: 0, max: 100 })
-  discountPercent?: number;
-
-  @Prop({ default: 0, min: 0 })
-  discount?: number;
-
-  @Prop({ required: true, default: 0, min: -999999 })
-  stock: number;
-
-  @Prop({ default: 0, min: 0 })
-  reservedStock: number;
-
-  @Prop({ type: MaterialInfoSchema })
-  material?: MaterialInfo;
-
-  @Prop({ type: DimensionsSchema })
-  dimensions?: Dimensions;
-
-  @Prop({ type: [VariantSchema], default: [] })
-  variants: Variant[];
-
-  @Prop({ type: [String], default: [] })
-  images: string[];
-
-  @Prop()
-  videoUrl?: string;
-
-  @Prop({ trim: true })
+  @Prop({
+    trim: true,
+  })
   description?: string;
 
-  // Imitation Jewelry Specific Field Additions
-  @Prop({ trim: true })
-  closureType?: string; // e.g., "Adjustable Drawstring (Dori)", "Lobster Claw", "Hook"
+  // ====================================================
+  // LIQUID PRODUCT INFORMATION
+  // ====================================================
 
-  @Prop({ type: Boolean, default: true })
-  isHypoallergenic?: boolean;
+  @Prop({
+    required: true,
+    enum: [
+      'liquid_detergent',
+      'dishwash',
+      'fabric_conditioner',
+      'floor_cleaner',
+      'phenyl',
+      'handwash',
+      'toilet_cleaner',
+      'bathroom_cleaner',
+      'multipurpose_cleaner',
+      'glass_cleaner',
+      'tile_cleaner',
+      'fabric_whitener',
+      'kitchen_cleaner',
+      'car_cleaner',
+      'other',
+    ],
+    index: true,
+  })
+  productType: string;
 
-  @Prop({ type: [String], default: [], index: true })
-  occasion?: string[]; // e.g., ["Festive", "Wedding", "Party Wear", "Everyday"]
+  @Prop({
+    default: 'Liquid',
+    trim: true,
+  })
+  productForm?: string;
+
+  @Prop({
+    default: false,
+    index: true,
+  })
+  isConcentrated: boolean;
+
+  @Prop({
+    trim: true,
+  })
+  concentration?: string;
+
+  @Prop({
+    min: 0,
+    max: 14,
+  })
+  phValue?: number;
+
+  // ====================================================
+  // FRAGRANCE / APPEARANCE
+  // ====================================================
+
+  @Prop({
+    trim: true,
+    index: true,
+  })
+  fragrance?: string;
+
+  @Prop({
+    trim: true,
+  })
+  color?: string;
 
   @Prop({
     type: [String],
-    default: [
-      'Keep away from water, perfumes, and direct heat.',
-      'Store in an airtight zip-lock pouch or soft box after use.',
-      'Wipe gently with a clean dry cloth after wear.',
-    ],
+    default: [],
   })
-  careInstructions?: string;
+  availableFragrances: string[];
 
-  @Prop({ default: 'No warranty' })
-  warranty?: string;
+  // ====================================================
+  // INGREDIENTS
+  // ====================================================
 
-  @Prop({ type: [String], default: [] })
+  @Prop({
+    type: [String],
+    default: [],
+  })
+  ingredients: string[];
+
+  @Prop({
+    trim: true,
+  })
+  ingredientDescription?: string;
+
+  // ====================================================
+  // BENEFITS
+  // ====================================================
+
+  @Prop({
+    type: [String],
+    default: [],
+  })
+  benefits: string[];
+
+  @Prop({
+    type: [String],
+    default: [],
+  })
+  features: string[];
+
+  // ====================================================
+  // USAGE
+  // ====================================================
+
+  @Prop({
+    type: UsageInfoSchema,
+  })
+  usage?: UsageInfo;
+
+  // ====================================================
+  // SAFETY
+  // ====================================================
+
+  @Prop({
+    type: SafetyInfoSchema,
+  })
+  safety?: SafetyInfo;
+
+  // ====================================================
+  // PACKAGING
+  // ====================================================
+
+  @Prop({
+    type: PackagingSchema,
+  })
+  packaging?: Packaging;
+
+  // ====================================================
+  // PRICING
+  // ====================================================
+
+  @Prop({
+    required: true,
+    min: 0,
+  })
+  price: number;
+
+  @Prop({
+    min: 0,
+  })
+  mrp?: number;
+
+  @Prop({
+    default: 0,
+    min: 0,
+    max: 100,
+  })
+  discountPercent?: number;
+
+  @Prop({
+    default: 0,
+    min: 0,
+  })
+  discount?: number;
+
+  // ====================================================
+  // INVENTORY
+  // ====================================================
+
+  @Prop({
+    required: true,
+    default: 0,
+    min: 0,
+  })
+  stock: number;
+
+  @Prop({
+    default: 0,
+    min: 0,
+  })
+  reservedStock: number;
+
+  @Prop({
+    type: [ProductVariantSchema],
+    default: [],
+  })
+  variants: ProductVariant[];
+
+  // ====================================================
+  // MEDIA
+  // ====================================================
+
+  @Prop({
+    type: [String],
+    default: [],
+  })
+  images: string[];
+
+  @Prop({
+    trim: true,
+  })
+  videoUrl?: string;
+
+  // ====================================================
+  // SEO
+  // ====================================================
+
+  @Prop({
+    type: [String],
+    default: [],
+  })
   tags: string[];
 
-  @Prop({ min: 0, max: 5 })
-  ratingAvg?: number;
+  @Prop({
+    type: [String],
+    default: [],
+  })
+  keywords: string[];
 
-  @Prop({ default: true, index: true })
+  @Prop({
+    trim: true,
+  })
+  metaTitle?: string;
+
+  @Prop({
+    trim: true,
+  })
+  metaDescription?: string;
+
+  // ====================================================
+  // PRODUCT INFORMATION
+  // ====================================================
+
+  @Prop({
+    trim: true,
+  })
+  warranty?: string;
+
+  @Prop({
+    trim: true,
+  })
+  shelfLife?: string;
+
+  @Prop({
+    trim: true,
+  })
+  storageInstructions?: string;
+
+  // ====================================================
+  // CERTIFICATION / TAX
+  // ====================================================
+
+  @Prop({
+    type: [String],
+    default: [],
+  })
+  certifications: string[];
+
+  @Prop({
+    trim: true,
+    index: true,
+  })
+  hsnCode?: string;
+
+  @Prop({
+    trim: true,
+  })
+  gstRate?: string;
+
+  // ====================================================
+  // BATCH INFORMATION
+  // ====================================================
+
+  @Prop({
+    trim: true,
+    index: true,
+  })
+  batchNumber?: string;
+
+  @Prop()
+  manufacturingDate?: Date;
+
+  @Prop()
+  expiryDate?: Date;
+
+  // ====================================================
+  // FLAGS
+  // ====================================================
+
+  @Prop({
+    default: true,
+    index: true,
+  })
   isActive: boolean;
 
   @Prop({
+    default: false,
+    index: true,
+  })
+  isFeatured: boolean;
+
+  @Prop({
+    default: false,
+    index: true,
+  })
+  isNewArrival: boolean;
+
+  @Prop({
+    default: false,
+    index: true,
+  })
+  isBestseller: boolean;
+
+  @Prop({
+    default: false,
+  })
+  isPremium: boolean;
+
+  // ====================================================
+  // STATUS
+  // ====================================================
+
+  @Prop({
     type: String,
-    enum: ['pending', 'published', 'archived'],
+    enum: ['draft', 'pending', 'published', 'archived'],
     default: 'published',
     index: true,
   })
   status: string;
 
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'SemiFinishedStock' })
-  sourceStockId?: MongooseSchema.Types.ObjectId;
-
-  @Prop({ index: true, sparse: true })
-  lotId?: string;
-
-  // --- Preserved Badges & Flags ---
-  @Prop({ default: false })
-  isFeatured: boolean;
-
-  @Prop({ default: false })
-  isNewArrival: boolean;
-
-  @Prop({ default: false })
-  isBestseller: boolean;
-
-  @Prop({ default: false })
-  isCombo: boolean;
-
-  @Prop({ default: false })
-  isPremium: boolean;
-
-  // Computed stock status
   @Prop({
     type: String,
     enum: ['in_stock', 'low_stock', 'out_of_stock'],
     default: 'in_stock',
   })
-  stockStatus: string;
-
-  // SEO
-  @Prop({ trim: true })
-  metaTitle?: string;
-
-  @Prop({ trim: true })
-  metaDescription?: string;
+  stockStatus?: string;
 }
 
-export const ProductSchema = SchemaFactory.createForClass(Product);
+export const ProductSchema =
+  SchemaFactory.createForClass(Product);
 
-// Auto-calculate discount percentage before saving
+// Lets read endpoints return the category name: .populate('category', 'name').
+ProductSchema.virtual('category', {
+  ref: 'Category',
+  localField: 'categoryId',
+  foreignField: '_id',
+  justOne: true,
+});
+ProductSchema.set('toJSON', { virtuals: true });
+
+// ======================================================
+// AUTO CALCULATE DISCOUNT
+// ======================================================
+
 ProductSchema.pre('save', function (next) {
-  if (this.mrp && this.mrp > 0 && this.price > 0) {
+  if (this.mrp && this.mrp > 0 && this.price >= 0) {
     this.discountPercent = Math.round(
       ((this.mrp - this.price) / this.mrp) * 100,
     );
-    this.discount = this.mrp - this.price;
+
+    this.discount = Math.max(
+      this.mrp - this.price,
+      0,
+    );
   }
+
   next();
 });
 
-// Compound & Search Indexes
-ProductSchema.index({ isFeatured: 1 });
-ProductSchema.index({ isNewArrival: 1 });
-ProductSchema.index({ isBestseller: 1 });
-ProductSchema.index({ isPremium: 1 });
-ProductSchema.index({ price: 1 });
-ProductSchema.index({ tags: 1 });
-ProductSchema.index({ 'material.baseMetal': 1 });
-ProductSchema.index({ 'material.plating': 1 });
+// ======================================================
+// INDEXES
+// ======================================================
+
+ProductSchema.index({
+  productType: 1,
+  isActive: 1,
+});
+
+ProductSchema.index({
+  categoryId: 1,
+  isActive: 1,
+});
+
+ProductSchema.index({
+  brandId: 1,
+  isActive: 1,
+});
+
+ProductSchema.index({
+  price: 1,
+});
+
+ProductSchema.index({
+  tags: 1,
+});
 
 ProductSchema.index({
   name: 'text',
+  shortDescription: 'text',
   description: 'text',
   tags: 'text',
-  'material.baseMetal': 'text',
-  'material.plating': 'text',
+  keywords: 'text',
+  fragrance: 'text',
+  ingredients: 'text',
 });

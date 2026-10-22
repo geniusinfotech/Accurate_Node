@@ -1,7 +1,5 @@
-/* eslint-disable prettier/prettier */
-import { IsString, IsEmail, IsOptional, MinLength, IsNotEmpty, ValidateNested, Matches, IsArray } from 'class-validator';
+import { IsString, IsEmail, IsOptional, MinLength, IsNotEmpty, ValidateNested, Matches } from 'class-validator';
 import { Type } from 'class-transformer';
-import { Role } from '../roles.enum';
 
 export class AddressDto {
   @IsString()
@@ -27,12 +25,21 @@ export class AddressDto {
 
 export class RegisterDto {
   @IsString()
-  @MinLength(3)
-  firstname: string;
+  @MinLength(2)
+  @IsOptional()
+  firstname?: string;
 
   @IsString()
-  @MinLength(3)
-  lastname: string;
+  @MinLength(2)
+  @IsOptional()
+  lastname?: string;
+
+  // Backwards-compat: storefront signup historically sent a single `name`.
+  // Whitelisted here so `forbidNonWhitelisted` doesn't reject it; the
+  // service splits it into firstname/lastname when those are absent.
+  @IsString()
+  @IsOptional()
+  name?: string;
 
   @IsString()
   @Matches(/^\+?[0-9\s\-()]{10,20}$/, { message: 'phone must be a valid phone number' })
@@ -50,8 +57,4 @@ export class RegisterDto {
   @IsString()
   @MinLength(6)
   password: string;
-
-  @IsArray()
-  @IsOptional()
-  roles?: Role[];
 }

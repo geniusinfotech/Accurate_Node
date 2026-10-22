@@ -16,7 +16,11 @@ const createService = (shippingRules: any) => {
     getSetting: jest.fn().mockResolvedValue(shippingRules),
   };
 
-  const service = new OrdersService({} as any, {} as any, settingsService);
+  const couponsService: any = {
+    calculateCouponDiscount: jest.fn().mockResolvedValue({ discount: 0 }),
+  };
+
+  const service = new OrdersService({} as any, {} as any, {} as any, settingsService, couponsService);
 
   return { service, settingsService };
 };
@@ -167,7 +171,9 @@ describe('OrdersService payment confirmation', () => {
         fetchOrder ? ({ orders: { fetch: fetchOrder } } as any) : null,
       );
 
-    return new OrdersService(OrderModel as any, productModel, settingsService);
+    return new OrdersService(OrderModel as any, productModel, {} as any, settingsService, {
+      calculateCouponDiscount: jest.fn().mockResolvedValue({ discount: 0 }),
+    } as any);
   };
 
   const orderDto = (signature?: string) => ({
@@ -240,5 +246,49 @@ describe('OrdersService payment confirmation', () => {
 
     expect(fetchOrder).not.toHaveBeenCalled();
     expect(order.paymentStatus).toBe('pending');
+  });
+});
+
+describe('OrdersService.getSummary revenue', () => {
+  const order = (totalAmount: number, orderStatus: string, paymentStatus: string) => ({
+    totalAmount,
+    orderStatus,
+    paymentStatus,
+  });
+
+  it('counts paid and delivered-COD orders, not cancelled or open COD', async () => {
+    const all = [
+      order(100, 'placed', 'paid'), // prepaid
+      order(200, 'delivered', 'pending'), // COD collected on delivery
+      order(400, 'placed', 'pending'), // COD not yet delivered
+      order(800, 'cancelled', 'paid'), // refunded/cancelled
+    ];
+    const orderModel: any = {
+      find: jest.fn(() => ({ exec: () => Promise.resolve(all) })),
+    };
+    const service = new OrdersService(orderModel, {} as any, {} as any, {} as any, {
+      calculateCouponDiscount: jest.fn().mockResolvedValue({ discount: 0 }),
+    } as any);
+
+    const summary = await service.getSummary();
+
+    expect(summary.totalWebRevenue).toBe(300);
+    expect(summary.totalOrdersCount).toBe(4);
+  });
+});
+
+describe('OrdersService shipping rules from the admin screen', () => {
+  it('uses flatRate, and ships free at or above freeShippingAbove', async () => {
+    const { service } = createService({ flatRate: 49, freeShippingAbove: 500 });
+
+    expect((await service.quoteOrder(499, '395007')).shippingCost).toBe(49);
+    expect((await service.quoteOrder(500, '395007')).shippingCost).toBe(0);
+  });
+
+  it('treats freeShippingAbove 0 as off and lets a pincode override win', async () => {
+    const { service } = createService({ flatRate: 60, freeShippingAbove: 0, '110011': 120 });
+
+    expect((await service.quoteOrder(5000, '395007')).shippingCost).toBe(60);
+    expect((await service.quoteOrder(5000, '110011')).shippingCost).toBe(120);
   });
 });
