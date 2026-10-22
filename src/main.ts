@@ -9,6 +9,7 @@ import { join } from 'path';
 import helmet from 'helmet';
 import express from 'express';
 
+import { noMongoOperators } from './common/middleware/no-mongo-operators';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 
@@ -23,6 +24,7 @@ async function bootstrap() {
   /* ---------------- Payload limits ---------------- */
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ limit: '1mb', extended: true }));
+  app.use(noMongoOperators); // reject $-operators in query strings and bodies
 
   // Transparently route /auth/google and callbacks whether called with or without /api prefix
   app.use((req: any, res: any, next: any) => {
@@ -73,7 +75,9 @@ async function bootstrap() {
   const uploadDir = join(process.cwd(), 'uploads');
   if (!existsSync(uploadDir)) mkdirSync(uploadDir, { recursive: true });
 
-  app.useStaticAssets(uploadDir, { prefix: '/uploads/' });
+  // Half-processed uploads live in uploads/temp; they must never be downloadable.
+  app.use('/uploads/temp', (_req, res) => res.status(404).end());
+  app.useStaticAssets(uploadDir, { prefix: '/uploads/', dotfiles: 'deny', index: false });
 
   /* ---------------- Logging ---------------- */
   app.use((req, res, next) => {
@@ -145,12 +149,30 @@ async function bootstrap() {
     );
   }
 
+  /* ---------------- Production safety warnings ---------------- */
+  if (process.env.NODE_ENV === 'production') {
+    if (!/\/\/[^/@]+:[^/@]+@/.test(process.env.MONGODB_URI || '')) {
+      logger.warn('🔓 MONGODB_URI has no username/password. Enable MongoDB auth and bind it to localhost or a private network only.');
+    }
+    if (!process.env.REDIS_PASSWORD && !['127.0.0.1', 'localhost', ''].includes(process.env.REDIS_HOST || '')) {
+      logger.warn('🔓 Redis is on a non-local host without REDIS_PASSWORD.');
+    }
+    if (process.env.COD_ENABLED === 'true') {
+      logger.warn('COD_ENABLED=true: unpaid (cash on delivery) orders can be placed through the public API.');
+    }
+  }
+
   /* ---------------- Graceful shutdown ---------------- */
   const shutdown = async (signal: string) => {
     logger.warn(`${signal} received, shutting down...`);
     await app.close();
     process.exit(0);
   };
+
+  // A missed await anywhere must not take the whole API down: log it and carry on.
+  process.on('unhandledRejection', (reason) => {
+    logger.error(`Unhandled promise rejection: ${reason instanceof Error ? reason.stack : String(reason)}`);
+  });
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

@@ -9,6 +9,9 @@ import { Contact, ContactDocument, ContactStatus } from './schemas/contact.schem
 import { CreateContactDto } from './dto/create-contact.dto';
 import { UpdateContactStatusDto } from './dto/update-contact.dto';
 
+/** User text in a $regex must match literally (no regex injection / ReDoS). */
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 @Injectable()
 export class ContactService {
   constructor(
@@ -57,11 +60,11 @@ export class ContactService {
     if (search && search.trim()) {
       const q = search.trim();
       filter.$or = [
-        { name: { $regex: q, $options: 'i' } },
-        { email: { $regex: q, $options: 'i' } },
-        { phone: { $regex: q, $options: 'i' } },
-        { subject: { $regex: q, $options: 'i' } },
-        { message: { $regex: q, $options: 'i' } },
+        { name: { $regex: escapeRegex(q), $options: 'i' } },
+        { email: { $regex: escapeRegex(q), $options: 'i' } },
+        { phone: { $regex: escapeRegex(q), $options: 'i' } },
+        { subject: { $regex: escapeRegex(q), $options: 'i' } },
+        { message: { $regex: escapeRegex(q), $options: 'i' } },
       ];
     }
 

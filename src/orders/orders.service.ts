@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   UnauthorizedException,
   Logger,
 } from '@nestjs/common';
@@ -16,7 +17,6 @@ import {
   getRazorpayInstance,
   toPaise,
 } from '../payment/razorpay-client.util';
-import { getTestOrder } from '../payment/test-orders.store';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
 import { Role } from '../auth/roles.enum';
 import { SettingsService } from '../settings/settings.service';
@@ -76,21 +76,6 @@ export class OrdersService {
     totalAmount: number,
   ): Promise<boolean> {
     if (!razorpayOrderId) return false;
-
-    if (
-      process.env.NODE_ENV !== 'production' &&
-      razorpayOrderId.startsWith('order_test_')
-    ) {
-      const expected = toPaise(totalAmount);
-      const testOrder = getTestOrder(razorpayOrderId);
-      if (testOrder && testOrder.amount !== expected) {
-        this.logger.error(
-          `Payment amount mismatch on ${razorpayOrderId}: test order holds ${testOrder.amount} paise, order comes to ${expected} paise. Recording unpaid.`,
-        );
-        return false;
-      }
-      return true;
-    }
 
     const instance = getRazorpayInstance();
     if (!instance) {
@@ -328,12 +313,33 @@ export class OrdersService {
       userId,
     );
 
-    // A payment counts only when Razorpay signed it AND the amount it captured
-    // is the amount this order comes to. Without the second half, a client can
-    // pay for a cheap cart and then post an expensive order with that same
-    // signature.
+    // A valid Razorpay signature proves a real payment exists for that order id; it cannot
+    // be produced without the secret. Without one, only an explicitly enabled COD (or a
+    // ₹0 order, e.g. fully covered by a coupon) may be placed. Otherwise anyone could
+    // spam the admin with unpaid orders through the public API.
+    const signed = verifyRazorpaySignature(createOrderDto);
+    if (!signed && totalAmount > 0 && process.env.COD_ENABLED !== 'true') {
+      throw new BadRequestException('Payment is required to place an order.');
+    }
+
+    // One payment, one order. A retry by the same buyer (dropped connection) gets the same
+    // order back; anyone else presenting this payment is refused.
+    const phone = createOrderDto.phone.trim().replace(/\D/g, '');
+    if (signed) {
+      const used = await this.orderModel
+        .findOne({ paymentId: createOrderDto.razorpay_payment_id })
+        .exec();
+      if (used) {
+        if (used.phone === phone) return used;
+        throw new ConflictException('This payment has already been used for an order.');
+      }
+    }
+
+    // Counts as paid only when the amount Razorpay captured is the amount this order comes
+    // to; otherwise a client could pay for a cheap cart and post an expensive order with
+    // that same signature.
     const paymentVerified =
-      verifyRazorpaySignature(createOrderDto) &&
+      signed &&
       (await this.paymentCoversOrder(
         createOrderDto.razorpay_order_id,
         totalAmount,
@@ -344,7 +350,7 @@ export class OrdersService {
       orderNumber,
       userId: userId ? new Types.ObjectId(userId) : undefined,
       customerName: createOrderDto.customerName.trim(),
-      phone: createOrderDto.phone.trim().replace(/\D/g, ''),
+      phone,
       address: createOrderDto.address.trim(),
       pincode: createOrderDto.pincode.trim(),
       items,
@@ -354,8 +360,8 @@ export class OrdersService {
       totalAmount,
       couponCode: appliedCouponCode || createOrderDto.couponCode?.trim() || '',
       couponDiscount: couponDiscount || 0,
-      paymentId: paymentVerified
-        ? createOrderDto.razorpay_payment_id
+      paymentId: signed
+        ? createOrderDto.razorpay_payment_id // kept even when unverified, for review and replay protection
         : createOrderDto.paymentId || '',
       // Never allow the client to declare itself paid: the only thing that
       // flips this is a Razorpay signature this server re-verified above.
@@ -455,15 +461,9 @@ export class OrdersService {
               `91${last10}`,
               `0${last10}`,
             ];
+            // Guest orders placed with the phone on this profile. The phone is not verified
+            // (no OTP), so these are shown masked below and never claimed as the user's.
             conditions.push({ phone: { $in: phoneVariants } });
-
-            // Automatically backfill userId on any unassigned matching orders
-            await this.orderModel
-              .updateMany(
-                { phone: { $in: phoneVariants }, userId: { $exists: false } },
-                { $set: { userId: userOid } },
-              )
-              .exec();
           }
         }
       } catch {
@@ -471,7 +471,8 @@ export class OrdersService {
       }
     }
 
-    if (phone) {
+    // Phone lookups are for guests only; a signed-in user cannot ask for someone else's number.
+    if (phone && !userId) {
       const clean = phone.trim().replace(/\D/g, '');
       const last10 = clean.slice(-10);
       if (last10.length >= 10) {
@@ -496,12 +497,11 @@ export class OrdersService {
       .limit(50)
       .exec();
 
-    // Guest phone lookups (unauthenticated) should mask address & payment IDs to prevent PII harvesting
-    if (!userId) {
-      return orders.map((o) => this.maskSensitiveOrder(o));
-    }
-
-    return orders;
+    // Full details only for orders this account actually placed; everything matched by phone
+    // number alone is masked to prevent PII harvesting.
+    return orders.map((o) =>
+      userOid && o.userId && o.userId.equals(userOid) ? o : this.maskSensitiveOrder(o),
+    );
   }
 
   private maskSensitiveOrder(order: any): any {

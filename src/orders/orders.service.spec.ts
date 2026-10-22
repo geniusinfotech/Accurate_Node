@@ -138,7 +138,7 @@ describe('OrdersService payment confirmation', () => {
       .update(`${orderId}|${paymentId}`)
       .digest('hex');
 
-  const createWithGateway = (fetchOrder: jest.Mock | null) => {
+  const createWithGateway = (fetchOrder: jest.Mock | null, existingOrder: any = null) => {
     const settingsService: any = {
       getSetting: jest.fn().mockResolvedValue(RULES),
     };
@@ -164,6 +164,7 @@ describe('OrdersService payment confirmation', () => {
       this.save = async () => this;
     }
     (OrderModel as any).countDocuments = async () => 0;
+    (OrderModel as any).findOne = () => ({ exec: async () => existingOrder });
 
     jest
       .spyOn(razorpayClient, 'getRazorpayInstance')
@@ -217,7 +218,7 @@ describe('OrdersService payment confirmation', () => {
     const order: any = await service.create(orderDto() as any);
 
     expect(order.paymentStatus).toBe('pending');
-    expect(order.paymentId).toBe('');
+    expect(order.paymentId).toBe('pay_live1'); // recorded for human review, not trusted
   });
 
   it('leaves the order unpaid when the gateway does not know the payment', async () => {
@@ -238,14 +239,40 @@ describe('OrdersService payment confirmation', () => {
     });
   });
 
-  it('never asks the gateway when the signature is forged', async () => {
+  it('rejects an order whose signature is forged, without asking the gateway', async () => {
     const fetchOrder = jest.fn().mockResolvedValue({ amount: EXPECTED_PAISE });
     const service = createWithGateway(fetchOrder);
 
-    const order: any = await service.create(orderDto('deadbeef') as any);
-
+    await expect(service.create(orderDto('deadbeef') as any)).rejects.toThrow('Payment is required');
     expect(fetchOrder).not.toHaveBeenCalled();
-    expect(order.paymentStatus).toBe('pending');
+  });
+
+  it('rejects an order with no payment at all (COD is off)', async () => {
+    const service = createWithGateway(jest.fn());
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, ...unpaid } = orderDto() as any;
+
+    await expect(service.create(unpaid)).rejects.toThrow('Payment is required');
+  });
+
+  it('allows unpaid orders only when COD is explicitly enabled', async () => {
+    process.env.COD_ENABLED = 'true';
+    try {
+      const service = createWithGateway(jest.fn());
+      const { razorpay_order_id, razorpay_payment_id, razorpay_signature, ...unpaid } = orderDto() as any;
+      await expect(service.create(unpaid)).resolves.toMatchObject({ paymentStatus: 'pending' });
+    } finally {
+      delete process.env.COD_ENABLED;
+    }
+  });
+
+  it('uses one payment for one order: same buyer gets the order back, anyone else is refused', async () => {
+    const earlier = { phone: '9999900000', paymentStatus: 'paid', orderNumber: 'ORD-1' };
+
+    const retry = createWithGateway(jest.fn(), earlier);
+    await expect(retry.create(orderDto() as any)).resolves.toBe(earlier); // dropped-connection retry
+
+    const replay = createWithGateway(jest.fn(), { ...earlier, phone: '8888800000' });
+    await expect(replay.create(orderDto() as any)).rejects.toThrow('already been used');
   });
 });
 
@@ -290,5 +317,35 @@ describe('OrdersService shipping rules from the admin screen', () => {
 
     expect((await service.quoteOrder(5000, '395007')).shippingCost).toBe(60);
     expect((await service.quoteOrder(5000, '110011')).shippingCost).toBe(120);
+  });
+});
+
+describe('OrdersService.findByUser privacy', () => {
+  const { Types } = require('mongoose');
+  const me = new Types.ObjectId();
+  const mine = { userId: me, customerName: 'Me Myself', phone: '9999900000', address: '1 My Street', pincode: '395007' };
+  const theirs = { userId: new Types.ObjectId(), customerName: 'Victim Person', phone: '8888800000', address: '9 Their Road', pincode: '110011' };
+  const strip = (o: any) => ({ ...o, userId: undefined });
+
+  const build = (rows: any[]) => {
+    const find = jest.fn(() => ({ sort: () => ({ limit: () => ({ exec: async () => rows.map((r) => ({ ...r, toObject: () => ({ ...r }) })) }) }) }));
+    const userModel: any = { findById: () => ({ exec: async () => ({ phone: '9999900000' }) }) };
+    const service = new OrdersService({ find } as any, {} as any, userModel, {} as any, {} as any);
+    return { service, find };
+  };
+
+  it("never searches another person's phone for a signed-in user", async () => {
+    const { service, find } = build([mine]);
+    await service.findByUser(me.toString(), '8888800000'); // victim's number passed by a logged-in user
+    const query = (find.mock.calls[0] as any[])[0];
+    expect(JSON.stringify(query)).not.toContain('8888800000');
+  });
+
+  it('shows own orders in full but masks orders matched only by phone number', async () => {
+    const { service } = build([mine, strip(theirs)]);
+    const [own, other]: any[] = await service.findByUser(me.toString());
+    expect(own.address).toBe('1 My Street');
+    expect(other.address).toBe('Delivery to PIN 110011');
+    expect(other.phone).toMatch(/^\*+0000$/);
   });
 });

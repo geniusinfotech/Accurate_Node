@@ -21,13 +21,7 @@ export function verifyRazorpaySignature(
     return false;
   }
 
-  const isTestOrder =
-    process.env.NODE_ENV !== 'production' &&
-    razorpay_order_id.startsWith('order_test_');
-
-  const secret =
-    getRazorpayKeySecret() ||
-    (isTestOrder ? 'test_secret_for_signature_checks' : '');
+  const secret = getRazorpayKeySecret();
   if (!secret) return false;
 
   const hmac = crypto.createHmac('sha256', secret);

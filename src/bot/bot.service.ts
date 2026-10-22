@@ -37,7 +37,7 @@ export class BotService {
 
     // 3. Fallback to hardcoded defaults for common queries if not in DB
     if (lowerMsg.includes('hello') || lowerMsg.includes('hi')) {
-      return 'Hello! I am glitera Bot. How can I help you today? You can ask about store hours, return policy, or product compatibility.';
+      return 'Hello! I am the Accurate Liquid assistant. How can I help you today? You can ask about store hours, return policy, or product compatibility.';
     }
 
     if (lowerMsg.includes('hours') || lowerMsg.includes('open')) {

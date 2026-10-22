@@ -12,8 +12,9 @@ export class RolesGuard implements CanActivate {
       context.getHandler(),
       context.getClass(),
     ]);
+    // Fail closed: a route that uses this guard but forgot its @Roles(...) is denied, not opened.
     if (!required || required.length === 0) {
-      return true; // no role restriction
+      return false;
     }
 
     const req = context
